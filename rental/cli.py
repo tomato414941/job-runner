@@ -4,6 +4,7 @@
   rental run DIRECTORY      carry the run to its end
   rental status DIRECTORY   what the run has finished, what its machines do, and what it has cost
   rental wait DIRECTORY     wait until the run is over; exit 0 when it is complete
+  rental stop DIRECTORY     ask the run to end now: its machines keep what they hold in the store and go back
 
 run keeps its memory, a copy of the record and a log of what it did,
 events.jsonl, in the directory, and exits 0 once the run is over. It takes the
@@ -14,7 +15,9 @@ names. It exits 75 when the store's key would expire before a URL it gives, so
 it runs best as a service that starts it again with new keys:
   systemd-run --user --unit rental-NAME -p Restart=on-failure -p RestartSec=60 -- KEYS rental run DIRECTORY
 where KEYS is the command that gives it its keys. check needs the same keys and
-changes nothing; status and wait read the directory alone.
+changes nothing; status and wait read the directory alone. stop writes the
+request, which the controller carrying the run takes up at its next look; a new
+run with the same spec carries on from what the store keeps.
 """
 
 import argparse
@@ -23,7 +26,7 @@ import sys
 import time
 from pathlib import Path
 
-from .controller import Controller
+from .controller import STOP, Controller
 from .decide import Memory
 from .record import Record
 from .spec import Spec
@@ -75,11 +78,20 @@ def status(args):
         "machines": {ident: {"state": machine.state, "dollars": round(machine.cost, 3)}
                      for ident, machine in remembered.machines.items()},
         "leaving": sorted(remembered.leaving), "dollars": round(remembered.spending(), 3),
-        "waiting_since": remembered.waiting_since,
+        "waiting_since": remembered.waiting_since, "stopping": remembered.stopping,
     }, ensure_ascii=False))
     path = args.directory / "events.jsonl"
     for line in (path.read_text().splitlines() if path.exists() else [])[-args.events:]:
         print(line)
+    return 0
+
+
+def stop(args):
+    if not (args.directory / "spec.json").exists():
+        raise SystemExit(f"{args.directory} holds no run")
+    request = args.directory / f".{STOP}"
+    request.write_text(json.dumps({"reason": args.reason, "at": round(time.time(), 3)}) + "\n")
+    request.replace(args.directory / STOP)
     return 0
 
 
@@ -94,7 +106,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="rental", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(required=True)
-    for name, function in (("check", check), ("run", run), ("status", status), ("wait", wait)):
+    for name, function in (("check", check), ("run", run), ("status", status), ("wait", wait), ("stop", stop)):
         command = commands.add_parser(name)
         command.add_argument("directory", type=Path)
         command.set_defaults(function=function)
@@ -102,6 +114,8 @@ def main(argv=None):
             command.add_argument("--events", type=int, default=5, help="how many of the last events to show")
         if name == "wait":
             command.add_argument("--seconds", type=float, default=30, help="how often to look")
+        if name == "stop":
+            command.add_argument("--reason", default="asked to stop", help="why, as the run's outcome tells it")
     args = parser.parse_args(argv)
     return args.function(args)
 

@@ -5,7 +5,8 @@ good for one object, one operation and its parts until it expires; one PUT
 takes at most max_put bytes; a range comes back as asked; parts are joined when
 the upload is finished. LocalProvider's machines are directories here, each its
 own HOME, whose processes it can kill and whose speed it sets; it returns a
-machine at its deadline, as a provider's watcher does.
+machine at its deadline, as a provider's watcher does, and rents each of its
+machines once, so that a machine to avoid never comes back.
 """
 
 import hashlib
@@ -150,16 +151,18 @@ class LocalStore:
 
 
 class LocalProvider:
-    """Machines that are directories here. An offer is {"price", "speed", "count"}: dollars an hour, a speed the
-    machine's processes see as RENTAL_SPEED, and how many machines it has."""
+    """Machines that are directories here. An offer is {"price", "speed", "count", "broken"}: dollars an hour, a
+    speed the machine's processes see as RENTAL_SPEED, how many machines it has, and whether their GPU is lost, which
+    the file `broken` in a machine's HOME tells its processes."""
 
     def __init__(self, directory, offers, uv):
         self.directory, self.offers, self.uv = Path(directory), offers, uv
-        self.machines_, self.rejected, self.rented = {}, [], []
+        self.machines_, self.rejected, self.rented, self.avoided = {}, [], [], []
         self.lock = threading.Lock()
 
-    def rent(self, label, _needs, hours):
+    def rent(self, label, _needs, hours, avoid=()):
         with self.lock:
+            self.avoided.append(tuple(avoid))
             offers = sorted((offer for offer in self.offers if offer.get("count", 1) > 0), key=lambda o: o["price"])
             if not offers:
                 return None, 0.0
@@ -170,6 +173,8 @@ class LocalProvider:
             (home / ".rental/uv").mkdir(parents=True)
             # The machine's uv is this one's, so that a rehearsal downloads nothing.
             (home / ".rental/uv/uv").symlink_to(self.uv)
+            if offer.get("broken"):
+                (home / "broken").touch()
             self.machines_[ident] = {"home": home, "label": label, "price": offer["price"], "speed": offer["speed"],
                                      "since": time.time(), "deadline": time.time() + hours * 3600, "answers": True}
             self.rented.append(ident)
@@ -219,6 +224,10 @@ class LocalProvider:
 
     # What only a rehearsal does
 
+    def lose_gpu(self, ident):
+        """The machine's GPU is lost: it still answers, but its job and its check fail from now on."""
+        (self.machines_[ident]["home"] / "broken").touch()
+
     def kill(self, ident):
         """The machine dies: its processes end and it answers no more."""
         self.kill_processes(self.machines_[ident])
@@ -226,17 +235,21 @@ class LocalProvider:
 
     @staticmethod
     def kill_processes(machine):
-        """End the machine's agent and everything it started, which share its process group."""
-        try:
-            pid = int((machine["home"] / ".rental/agent.pid").read_text())
-            command = Path(f"/proc/{pid}/cmdline").read_bytes()
-        except (FileNotFoundError, ValueError):
-            return
-        if str(machine["home"]).encode() in command:
-            try:
-                os.killpg(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        """End every process of the machine: its agent and whatever the agent started, which all have its HOME."""
+        mark = f"HOME={machine['home']}".encode()
+        # Again, for what a process started while the last pass went by.
+        for _ in range(3):
+            killed = False
+            for entry in Path("/proc").iterdir():
+                try:
+                    if entry.name.isdigit() and mark in (entry / "environ").read_bytes().split(b"\0"):
+                        os.kill(int(entry.name), signal.SIGKILL)
+                        killed = True
+                except OSError:
+                    # Gone already, or another user's.
+                    continue
+            if not killed:
+                break
 
     def close(self):
         for machine in self.machines_.values():

@@ -8,21 +8,35 @@ as when its machine did not answer, shows in what decide sees next, and decide
 acts on that.
 
 What a machine's agent reports puts the machine in a state:
-  installing  nothing of the job there, or its setup running -> out if the setup fails or takes too long
-  working     the job installed, its steps fetching, running or ended
-                                                             -> handing when slow; out when a step fails
-  handing     told to stop, its checkpoint going to store    -> out once kept, or after policy.handover
+  installing  nothing of the job there, or its setup or check running -> out if the install fails or takes too long
+  working     the job installed, its steps fetching, running or ended -> handing when slow or when the run stops;
+                                                                         out when it breaks
+  handing     told to stop, its checkpoint going to store             -> out once kept, or after policy.handover
 An installed agent that is idle is started. Only handing is the controller's
 own: a machine it hands over stays handing whatever its agent does next. A
 machine that does not answer for policy.unreachable goes out from any state.
-Out, it is released, and rejected when the fault is the machine's; until the
-provider lists it no more, it is leaving. A machine's deadline moves on while
-less than policy.renew of it is left.
+Out, it is released; until the provider lists it no more, it is leaving. A
+machine's deadline moves on while less than policy.renew of it is left.
 
-The run ends complete once the store keeps every step's outputs; failed when a
-step or the setup fails on too many machines, renting keeps failing or an
-upload keeps failing; over budget once it has cost policy.budget. Ending
-releases every machine, and the run is over once the provider lists none.
+A machine is rejected, so that the provider never rents it again, only for what
+sets it apart from the work: it stops answering, runs well below the rate its
+step went at elsewhere, takes too long to install, fails the check after it
+passed it, or fails the install that another machine of the run passed. When a
+step fails, its agent runs the check: a machine that fails it now is what broke,
+and the step carries on elsewhere as if it had not failed; on a machine that
+passes it, the step runs again, and the run fails once it has failed
+policy.step_failures times so. A machine whose install fails before any machine
+passed it goes back unrejected, this run rents it no more, and it is rejected
+once another machine passes the install; the run fails once the install has
+failed on policy.install_failures machines and passed on none. A job that stops
+by itself starts again, and the run fails when it stops more than
+policy.restarts times on one machine.
+
+The run ends complete once the store keeps every step's outputs; failed as
+above, or when renting or an upload keeps failing; over budget once it has cost
+policy.budget; stopped when asked to, once its machines have handed over what
+they hold. Ending releases every machine, and the run is over once the provider
+lists none.
 """
 
 from copy import deepcopy
@@ -34,7 +48,8 @@ from itertools import dropwhile
 
 @dataclass(frozen=True)
 class Rent:
-    pass
+    """Rent a machine, but none of those that these released machines ran on."""
+    avoid: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -80,6 +95,13 @@ class Release:
 
 
 @dataclass(frozen=True)
+class Reject:
+    """Have the provider rent a machine already released never again."""
+    machine: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class End:
     """The run is over: it has its outcome, and the provider lists none of its machines."""
     outcome: str
@@ -114,6 +136,12 @@ class KeepFailed:
 
 
 @dataclass(frozen=True)
+class StopAsked:
+    """Someone asked the run to end before it is done."""
+    reason: str
+
+
+@dataclass(frozen=True)
 class Released:
     """What the provider says a released machine cost, or None when it did not say."""
     machine: str
@@ -142,6 +170,8 @@ class Machine:
     # Why it is handed over, and whether that is its fault.
     reason: str | None = None
     reject: bool = False
+    # When the last step failure that it ran again happened, as its agent tells it.
+    failure: float | None = None
 
 
 @dataclass
@@ -170,11 +200,16 @@ class Memory:
     leaving: dict = field(default_factory=dict)
     uploads: dict = field(default_factory=dict)
     spent: float = 0.0
-    # step -> how many machines it failed on
+    # step -> how many times it failed on machines that passed their check
     failures: dict = field(default_factory=dict)
     install_failures: int = 0
+    # Whether a machine passed the install; until one does, id -> why for those that failed it.
+    installed: bool = False
+    suspects: dict = field(default_factory=dict)
     rent_failures: int = 0
     waiting_since: float | None = None
+    # Why the run was asked to stop.
+    stopping: str | None = None
     outcome: str | None = None
     detail: str | None = None
     ended: bool = False
@@ -247,16 +282,22 @@ class Decision:
                 memory.leaving[fact.machine].cost = fact.dollars
             elif isinstance(fact, KeepFailed) and fact.id in memory.uploads:
                 memory.uploads[fact.id].failed = True
+            elif isinstance(fact, StopAsked) and memory.stopping is None:
+                memory.stopping = fact.reason
 
     def judge(self):
-        """End the run once it is complete or over its budget; rent a machine when none works on it."""
+        """End the run once it is complete, over its budget, or stopping with its machines gone; rent a machine when
+        none works on it."""
         memory = self.memory
         if not self.record.remaining(self.spec):
             self.end("complete", "every step's outputs are in the store")
         elif self.policy.budget is not None and memory.spending() >= self.policy.budget:
             self.end("over budget", f"{memory.spending():.2f} dollars spent")
+        elif memory.stopping is not None:
+            if not memory.machines:
+                self.end("stopped", memory.stopping)
         elif not memory.machines:
-            self.actions.append(Rent())
+            self.actions.append(Rent(tuple(memory.suspects)))
 
     def end(self, outcome, detail):
         """Give the run its outcome and release its machines; it is over once they are gone."""
@@ -303,6 +344,8 @@ class Decision:
         self.tend_outbox(ident, machine, report)
         if memory.outcome or ident not in memory.machines:
             return
+        if memory.stopping is not None and machine.state != "handing":
+            self.hand(ident, machine, f"the run stops: {memory.stopping}", False)
         if machine.state == "handing":
             self.hand_over(ident, machine, report)
         else:
@@ -317,17 +360,19 @@ class Decision:
             if machine.state != "installing":
                 self.to(machine, "installing")
             elif self.now - machine.since > self.policy.install:
-                self.release(ident, "its setup took too long", True)
+                self.release(ident, "its install took too long", True)
                 return
             if phase == "empty":
                 # A machine without the job, or an agent that started over before its install was done.
                 self.actions.append(Install(ident))
             elif phase == "install_failed":
-                self.setup_failed(ident)
-        elif phase == "ready":
+                self.install_failed(ident, report.get("failure") or {})
+            return
+        self.passed_install()
+        if phase == "ready":
             if machine.state == "working":
                 # The start did not arrive, or the agent started over.
-                self.restart(ident, machine, "its job is not running")
+                self.restart(ident, machine, "its job is not running", report)
             else:
                 self.actions.append(Start(ident))
                 self.to(machine, "working")
@@ -342,38 +387,74 @@ class Decision:
         phase = report["phase"]
         if phase in RUNNING:
             self.watch_rate(ident, machine, report)
+        elif phase == "checking":
+            # A step failed, and the agent checks the machine; a check that hangs is the machine's.
+            if (report.get("seconds") or 0) > self.policy.install:
+                self.release(ident, f"its check took too long after {report.get('step')} failed", True)
         elif report.get("outbox"):
             # What the job left goes to the store before anything else happens to the machine.
             return
         elif phase == "finished":
             if self.record.remaining(self.spec):
                 # Every step it was given ended well, yet the store lacks some of what they left.
-                self.restart(ident, machine, "the store lacks what its steps left")
+                self.restart(ident, machine, "the store lacks what its steps left", report)
         elif phase == "failed":
-            self.step_failed(ident, report["failure"]["step"])
+            self.step_failed(ident, machine, report)
         else:
-            self.restart(ident, machine, f"its job stopped by itself ({phase})")
+            self.restart(ident, machine, f"its job stopped by itself ({phase})", report)
 
-    def restart(self, ident, machine, reason):
-        if machine.restarts >= self.policy.restarts:
-            self.release(ident, f"{reason}, again", True)
-        else:
+    def restart(self, ident, machine, reason, report):
+        """Start a job that stopped by itself again; once it has stopped too often, the run fails, whoever's fault it
+        is, as soon as what the machine holds is kept."""
+        if machine.restarts < self.policy.restarts:
             machine.restarts += 1
             self.actions.append(Start(ident))
+        elif not report.get("outbox"):
+            self.end("failed", f"{reason}, {machine.restarts + 1} times on one machine")
 
-    def setup_failed(self, ident):
-        self.memory.install_failures += 1
-        if self.memory.install_failures >= self.policy.install_failures:
-            self.end("failed", f"the setup failed on {self.memory.install_failures} machines")
-        else:
-            self.release(ident, "its setup failed", True)
+    def passed_install(self):
+        """A machine passed the install: those that failed it before are what failed."""
+        self.memory.installed = True
+        for ident, reason in self.memory.suspects.items():
+            self.actions.append(Reject(ident, f"{reason}, which another machine of the run passed"))
+        self.memory.suspects.clear()
 
-    def step_failed(self, ident, step):
-        failures = self.memory.failures[step] = self.memory.failures.get(step, 0) + 1
-        if failures >= self.policy.step_failures:
-            self.end("failed", f"{step} failed on {failures} machines")
+    def install_failed(self, ident, failure):
+        """Reject a machine whose install fails where another's passed; until one passes, the fault may be the work's."""
+        memory, reason = self.memory, f"its install failed: {failure.get('detail') or failure.get('error')}"
+        if memory.installed:
+            self.release(ident, reason, True)
+            return
+        memory.install_failures += 1
+        if memory.install_failures >= self.policy.install_failures:
+            self.end("failed", f"the install failed on {memory.install_failures} machines and passed on none")
         else:
-            self.release(ident, f"{step} failed on it", True)
+            memory.suspects[ident] = reason
+            self.release(ident, reason, False)
+
+    def step_failed(self, ident, machine, report):
+        """Release a machine that broke under the step; run the step again on one that did not."""
+        failure = report["failure"]
+        step = failure["step"]
+        if not failure["sound"]:
+            # It passed the check before the step; failing it now, the machine is what broke.
+            self.release(ident, f"it failed its check after {step} failed: {failure['check']}", True)
+        elif failure["at"] == machine.failure:
+            # This failure was given another try already, which did not arrive.
+            self.restart(ident, machine, "its job is not running", report)
+        else:
+            machine.failure = failure["at"]
+            failures = self.memory.failures[step] = self.memory.failures.get(step, 0) + 1
+            if failures >= self.policy.step_failures:
+                self.end("failed", f"{step} failed {failures} times on machines that pass their check")
+            else:
+                self.actions.append(Start(ident))
+
+    def hand(self, ident, machine, reason, reject):
+        """Tell the machine's job to stop and keep what it can; the machine goes once that is kept."""
+        self.actions.append(Stop(ident))
+        self.to(machine, "handing")
+        machine.reason, machine.reject = reason, reject
 
     def hand_over(self, ident, machine, report):
         """Release a machine handed over once its job has stopped and its files are kept, or when that takes too long."""
@@ -386,7 +467,7 @@ class Decision:
         step = self.spec.step(report.get("step"))
         progress = report.get("progress") or {}
         rate = progress.get("rate")
-        if (not step or not step.rate or rate is None or (report.get("step_seconds") or 0) < self.policy.warmup
+        if (not step or not step.rate or rate is None or (report.get("seconds") or 0) < self.policy.warmup
                 or rate >= self.policy.slow_ratio * step.rate):
             machine.slow_since = None
             return
@@ -395,9 +476,7 @@ class Decision:
             return
         if self.seconds_left(step, progress) * (step.rate / max(rate, 1e-9) - 1) <= self.policy.replace:
             return
-        self.actions.append(Stop(ident))
-        self.to(machine, "handing")
-        machine.reason, machine.reject = f"slow: {rate:.4g} a second on {step.name}, {step.rate:.4g} expected", True
+        self.hand(ident, machine, f"slow: {rate:.4g} a second on {step.name}, {step.rate:.4g} expected", True)
 
     def seconds_left(self, step, progress):
         """What the steps left, from this one on, would take at their expected rates."""

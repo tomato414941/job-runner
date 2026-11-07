@@ -57,6 +57,12 @@ class CommandLineTests(unittest.TestCase):
         later.join()
         self.assertEqual((code, printed), (0, [{"outcome": "complete", "detail": "done"}]))
 
+    def test_asks_the_run_to_stop_with_the_reason_given(self):
+        self.assertEqual(main(["stop", str(self.root), "--reason", "the spec is wrong"]), 0)
+        self.assertEqual(json.loads((self.root / "stop").read_text())["reason"], "the spec is wrong")
+        with self.assertRaisesRegex(SystemExit, "holds no run"):
+            main(["stop", str(self.root / "elsewhere")])
+
     def test_says_by_its_exit_code_whether_the_run_completed(self):
         self.remember(Memory(outcome="failed", detail="first failed on 2 machines", ended=True))
         self.assertEqual(self.command("wait")[0], 1)

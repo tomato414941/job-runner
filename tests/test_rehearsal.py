@@ -12,6 +12,7 @@ import time
 import unittest
 from pathlib import Path
 
+from rental.cli import main
 from rental.controller import Controller
 from rental.local import SIGNATURE, LocalProvider, LocalStore
 
@@ -49,6 +50,7 @@ class RehearsalTests(unittest.TestCase):
             "name": "rehearsal", "provider": {"kind": "local"}, "store": {"kind": "local", "prefix": PREFIX},
             "code": {"path": "code.tar.gz"},
             "setup": [["python3", "job.py", "setup"]],
+            "check": [["python3", "job.py", "check"]],
             "files": [{"path": "data/corpus.bin", "key": "data/corpus.bin",
                        "sha256": hashlib.sha256(corpus).hexdigest(), "bytes": len(corpus)}],
             "steps": [
@@ -85,8 +87,18 @@ class RehearsalTests(unittest.TestCase):
     def events(self):
         return [json.loads(line) for line in (self.run_directory / "events.jsonl").read_text().splitlines()]
 
+    def lengthen_first(self):
+        """Give the first step 300 steps, so that it still runs when a test acts on it after its first kept checkpoint,
+        however long the commands of the ticks before take."""
+        self.spec["steps"][0] = train("first", 300, "--data", "data/corpus.bin", inputs=["data/corpus.bin"])
+
     def job_log(self, machine, step):
         return self.root / "machines" / machine / ".rental/logs" / f"{step}.log"
+
+    def started(self, machine, step):
+        """Whether the step's job on the machine is under way, past setting up what it does on SIGTERM."""
+        log = self.job_log(machine, step)
+        return log.exists() and '"event": "start"' in log.read_text()
 
     def assert_run_complete(self):
         self.assertEqual(json.loads(self.store.objects[f"{PREFIX}/outputs/out/evaluation.json"]),
@@ -122,9 +134,8 @@ class RehearsalTests(unittest.TestCase):
                 self.provider.kill("m1")
             return False
 
-        controller = self.controller()
-        self.carry(controller, until=kill_once_a_checkpoint_is_kept)
-        outcome = self.carry(controller)
+        self.lengthen_first()
+        outcome = self.carry(self.controller(), until=kill_once_a_checkpoint_is_kept)
 
         self.assertEqual(outcome, "complete")
         self.assert_run_complete()
@@ -145,19 +156,68 @@ class RehearsalTests(unittest.TestCase):
         start = json.loads(self.job_log("m2", "first").read_text().splitlines()[0])
         self.assertGreater(start["resumed_from"], 0)
 
-    def test_tries_a_failed_step_on_a_second_machine_then_ends_the_run_with_its_log_and_checkpoint_kept(self):
+    def test_runs_a_failed_step_again_on_its_machine_then_ends_the_run_failed_with_its_log_and_checkpoint_kept(self):
         self.spec["steps"][0]["command"] += ["--fail-at", "25"]
 
         outcome = self.carry(self.controller())
 
         self.assertEqual(outcome, "failed")
-        self.assertEqual(self.provider.rented, ["m1", "m2"])
-        self.assertEqual(self.provider.rejected, [("m1", "first failed on it")])
+        self.assertEqual(self.provider.rented, ["m1"])
+        self.assertEqual(self.provider.rejected, [])
+        runs = [json.loads(line) for line in self.job_log("m1", "first").read_text().splitlines() if line.startswith("{")]
+        self.assertEqual([run["resumed_from"] for run in runs], [0, 20])
         self.assertIn(f"{PREFIX}/logs/first.log", self.store.objects)
         self.assertIn(f"{PREFIX}/checkpoints/first/out/first/last.pt", self.store.objects)
         self.assertEqual(self.events()[-1]["outcome"], "failed")
         self.assertEqual(self.provider.machines("rehearsal"), [])
         self.assert_no_url_written()
+
+    def test_rejects_a_machine_that_loses_its_gpu_and_carries_the_step_on_elsewhere_from_its_last_checkpoint(self):
+        def lose_the_gpu_once_a_checkpoint_is_kept(controller):
+            if controller.record.checkpoints and not (self.root / "machines/m1/broken").exists():
+                self.provider.lose_gpu("m1")
+            return False
+
+        self.lengthen_first()
+        outcome = self.carry(self.controller(), until=lose_the_gpu_once_a_checkpoint_is_kept)
+
+        self.assertEqual(outcome, "complete")
+        self.assert_run_complete()
+        [(machine, reason)] = self.provider.rejected
+        self.assertEqual(machine, "m1")
+        self.assertRegex(reason, r"^it failed its check after first failed: python3 job\.py check ended with 1")
+        start = json.loads(self.job_log("m2", "first").read_text().splitlines()[0])
+        self.assertGreaterEqual(start["resumed_from"], 10)
+
+    def test_rents_another_machine_when_the_install_fails_and_rejects_the_first_once_the_other_passes_it(self):
+        self.offers[:] = [{"price": 0.4, "speed": 1.0, "count": 1, "broken": True},
+                          {"price": 0.5, "speed": 1.0, "count": 1}]
+
+        outcome = self.carry(self.controller())
+
+        self.assertEqual(outcome, "complete")
+        self.assert_run_complete()
+        self.assertEqual(self.provider.rented, ["m1", "m2"])
+        self.assertEqual(self.provider.avoided, [(), ("m1",)])
+        [(machine, reason)] = self.provider.rejected
+        self.assertEqual(machine, "m1")
+        self.assertRegex(reason, r"^its install failed: the check failed: python3 job\.py check ended with 1.*"
+                                 r", which another machine of the run passed$")
+
+    def test_ends_the_run_stopped_when_asked_once_its_machine_kept_what_it_held(self):
+        self.lengthen_first()
+        controller = self.controller()
+        self.carry(controller, until=lambda controller: self.started("m1", "first"))
+        main(["stop", str(self.run_directory), "--reason", "the spec is wrong"])
+
+        outcome = self.carry(controller)
+
+        self.assertEqual((outcome, controller.memory.detail), ("stopped", "the spec is wrong"))
+        self.assertEqual((self.provider.rented, self.provider.rejected), (["m1"], []))
+        # The job saved its checkpoint when told to stop, and the store keeps it for a run that carries on.
+        self.assertIn(f"{PREFIX}/checkpoints/first/out/first/last.pt", self.store.objects)
+        self.assertIn(f"{PREFIX}/logs/first.log", self.store.objects)
+        self.assertEqual(self.provider.machines("rehearsal"), [])
 
     def test_carries_the_run_on_when_the_controller_stops_and_starts_again(self):
         first = self.controller()

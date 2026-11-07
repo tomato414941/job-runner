@@ -8,11 +8,11 @@ The first command starts the daemon, which serves every command on a Unix
 socket and owns the job's processes: the job ends when the daemon does.
 
   status   the phase, the step and its rate, the outbox, the GPUs and the free disk
-  install  {"code": {"url", "sha256", "bytes"}, "setup": [[argument, ...], ...]}
-           fetch and unpack the job's code, then run its setup commands there
+  install  {"code": {"url", "sha256", "bytes"}, "setup": [[argument, ...], ...], "check": [[argument, ...], ...]}
+           fetch and unpack the job's code, then run its setup commands there, then its check
   start    {"files": [{"path", "url", "sha256", "bytes", "if_missing"}],
-            "steps": [{"name", "command", "environment", "outputs"}]}
-           fetch the files into the code, then run the steps in order
+            "steps": [{"name", "command", "environment", "outputs"}], "check": [[argument, ...], ...]}
+           fetch the files into the code, then run the steps in order; when one fails, run the check
   send     {"uploads": [{"id", "url"} | {"id", "upload", "parts": [{"number", "start", "length", "url"}]}]}
            upload outbox files where told
   forget   {"ids": [...]}  drop outbox files that storage now keeps
@@ -23,11 +23,15 @@ or a start while it installs or runs steps.
 
 The phase says what the agent does, or how its last work ended: empty, without
 the job; installing, then ready or install_failed; fetching what the steps
-read, then working through them, then finished, failed (a step exited with
-another code than 0), stopped (told to), fetch_failed or crashed.
+read, then working through them, then finished, stopped (told to), fetch_failed
+or crashed; or, when a step exits with another code than 0, checking the
+machine, then failed. A failure tells the step, its exit code, whether the
+machine still passes its check, and what failed of the check if not. Each
+command runs in a process group of its own, and what it leaves running ends with
+it, so that nothing of a failed step stays to fail the check or the next step.
 
-What a job does for the run:
-- run again, a step's command finishes what is left and redoes nothing done;
+What a step's command does for the run:
+- run again, it finishes what is left and redoes nothing done;
 - it may write {"done": N, "total": M} to the file RENTAL_PROGRESS names;
 - a file it wants kept, such as a checkpoint once saved, it links into the
   directory RENTAL_KEEP names, under its path relative to the code with each
@@ -188,6 +192,17 @@ def within(root, relative):
     return path
 
 
+def ended(command, code, log):
+    """What a command that failed said last, for the controller to tell."""
+    try:
+        with open(log, "rb") as source:
+            source.seek(max(0, source.seek(0, os.SEEK_END) - 400))
+            said = " ".join(source.read().decode(errors="replace").split())
+    except OSError:
+        said = ""
+    return f"{' '.join(command)[:120]} ended with {code}: {said}"
+
+
 def write_json(path, value):
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(json.dumps(value) + "\n")
@@ -266,36 +281,52 @@ class Daemon:
 
     def status(self):
         with self.lock:
+            # How long the step, or the check after it failed, has run.
+            seconds = time.time() - self.started if self.phase in ("working", "checking") else None
             report = {
-                "phase": self.phase, "step": self.step, "failure": self.failure,
-                "step_seconds": time.time() - self.started if self.step and self.started else None,
+                "phase": self.phase, "step": self.step, "failure": self.failure, "seconds": seconds,
                 "progress": self.progress, "outbox": [dict(entry) for entry in self.outbox.values()],
             }
         report["gpus"] = gpus()
         report["disk_free"] = shutil.disk_usage(HOME).free
         return report
 
-    def run(self, command, log, environment=None):
-        """Run a command in the code, its output appended to log, unless stopping; return its exit code."""
+    def run(self, command, log, environment=None, step=None):
+        """Run a command in the code, its output appended to log, unless stopping, and return its exit code.
+
+        A step's command learns where to report its progress and keep its files, which are taken in while it runs.
+        The command runs in a process group of its own, and what it leaves running is ended with it.
+        """
+        variables = {**os.environ, **(environment or {})}
+        if step:
+            variables.update(RENTAL_PROGRESS=str(PROGRESS), RENTAL_KEEP=str(KEEP))
         with self.lock:
             if self.stopping:
                 return None
             with open(log, "a") as output:
                 self.process = subprocess.Popen(
                     [sys.executable, "-c", WITH_PARENT, str(os.getpid()), *command], cwd=CODE, stdout=output,
-                    stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                    env={**os.environ, **(environment or {}), "RENTAL_PROGRESS": str(PROGRESS),
-                         "RENTAL_KEEP": str(KEEP)},
+                    stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=variables, process_group=0,
                 )
-        process = self.process
-        observations = deque()
+        process, observations = self.process, deque()
         while process.poll() is None:
             time.sleep(self.poll)
+            if step:
+                self.observe(observations)
+                self.keep_scan(step)
+        if step:
             self.observe(observations)
-            if self.step:
-                self.keep_scan(self.step)
-        self.observe(observations)
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
         return process.returncode
+
+    def check(self, commands):
+        """Whether the machine passes the job's check, and what failed of it if not."""
+        for command in commands:
+            code = self.run(command, LOGS / "check.log")
+            if code != 0:
+                return False, ended(command, code, LOGS / "check.log")
+        return True, None
 
     def observe(self, observations):
         """Read the job's progress and work out its rate over the last window."""
@@ -348,9 +379,12 @@ class Daemon:
                 unpacked.rename(CODE)
                 archive.unlink()
             for command in payload.get("setup", []):
-                exit_code = self.run(command, LOGS / "setup.log")
-                if exit_code != 0:
-                    raise RuntimeError(f"setup ended with {exit_code}: {command[0]}")
+                code = self.run(command, LOGS / "setup.log")
+                if code != 0:
+                    raise RuntimeError(f"the setup failed: {ended(command, code, LOGS / 'setup.log')}")
+            sound, detail = self.check(payload.get("check", []))
+            if not sound:
+                raise RuntimeError(f"the check failed: {detail}")
             INSTALLED.write_text(source["sha256"] + "\n")
             with self.lock:
                 self.phase = "ready"
@@ -365,6 +399,8 @@ class Daemon:
             self.poll = min(2.0, self.window / 10)
         try:
             for item in payload["files"]:
+                if self.stopping:
+                    break
                 path = within(CODE, item["path"])
                 if not (item.get("if_missing") and path.exists()):
                     download(item["url"], path, item["sha256"], item["bytes"])
@@ -377,15 +413,23 @@ class Daemon:
                 self.phase, self.step, self.progress, self.started = "working", step["name"], None, time.time()
             PROGRESS.unlink(missing_ok=True)
             log = LOGS / f"{step['name']}.log"
-            code = self.run(step["command"], log, step.get("environment"))
+            code = self.run(step["command"], log, step.get("environment"), step["name"])
             self.keep_scan(step["name"])
             if self.stopping or code != 0:
-                self.enqueue("log", step["name"], log, f".rental/logs/{step['name']}.log")
+                if log.exists():
+                    # A step told to stop before it began has no log.
+                    self.enqueue("log", step["name"], log, f".rental/logs/{step['name']}.log")
+                if not self.stopping:
+                    # Whose fault it is: a machine that passed its check and fails it now is what broke.
+                    with self.lock:
+                        self.phase, self.started = "checking", time.time()
+                    sound, detail = self.check(payload.get("check", []))
                 with self.lock:
                     if self.stopping:
                         self.phase = "stopped"
                     else:
-                        self.phase, self.failure = "failed", {"step": step["name"], "exit_code": code}
+                        self.phase, self.failure = "failed", {"step": step["name"], "exit_code": code,
+                                                              "sound": sound, "check": detail, "at": time.time()}
                 return
             outputs = []
             for output in step.get("outputs", []):

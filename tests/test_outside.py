@@ -182,6 +182,9 @@ sys.exit(3 if command == "fails" else 0)
                                             "--hours", "6.5", "--disk", "200", "--max-price", "0.64", "--tries", "6",
                                             "--query", '{"a": 1}'])
         self.assertEqual(self.provider.rent("scarce", needs, 6), (None, 0.0))
+        self.provider.rent("run", needs, 6, avoid=("7", "9"))
+        rent = self.called()[-1]
+        self.assertEqual(rent[rent.index("--avoid") + 1], "7,9")
 
     def test_tells_a_rent_that_failed_from_one_without_an_offer(self):
         needs = {"gpu": "RTX 5090", "image": "image", "disk": 200, "max_price": 0.64}

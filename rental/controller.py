@@ -8,7 +8,8 @@ directory beside spec.json. Whatever it does not expect stops it; started again,
 it takes the run up from the record and its memory, and the machines it no
 longer watches go back at their deadlines. It stops as well once the store's key
 would not outlast a URL it gives, so that whatever gives it its keys starts it
-again with new ones.
+again with new ones. A request to stop the run, the file `stop` in the
+directory, ends the run once its machines have handed over what they hold.
 """
 
 import hashlib
@@ -19,7 +20,7 @@ import tarfile
 import time
 from pathlib import Path
 
-from .decide import KeepFailed, Memory, NoOffer, Released, RentFailed, Seen, Spent, decide
+from .decide import KeepFailed, Memory, NoOffer, Released, RentFailed, Seen, Spent, StopAsked, decide
 from .provider import RentError, Unreachable
 from .record import Record
 from .spec import Spec
@@ -27,6 +28,8 @@ from .spec import Spec
 AGENT = '"$HOME/.rental/bootstrap.sh" {command}'
 SHIP = 'mkdir -p "$HOME/.rental" && tar -x -C "$HOME/.rental"'
 MACHINE_FILES = ("agent.py", "bootstrap.sh")
+# The file in a run's directory that asks the run to stop, with why: {"reason": ...}.
+STOP = "stop"
 # The shell's exit code for a command it cannot find, as the agent's entry before it is shipped.
 NOT_FOUND = 127
 # Seconds a command on a machine may take: a status answers at once, and the first command may install uv and Python.
@@ -135,6 +138,9 @@ class Controller:
             asked = not self.memory.outcome and ident not in self.memory.leaving
             world[ident] = Seen(row["cost"], row["deadline"], self.status(ident) if asked else None)
         facts, self.facts = self.facts, []
+        stop = self.directory / STOP
+        if stop.exists():
+            facts.append(StopAsked(json.loads(stop.read_text())["reason"]))
         actions, self.memory = decide(self.spec, self.record, self.memory, world, facts, self.clock())
         for action in actions:
             # Each action has the method of its name: Rent, rent; Keep, keep.
@@ -183,9 +189,10 @@ class Controller:
 
     # Actions
 
-    def rent(self, _action):
+    def rent(self, action):
         try:
-            ident, dollars = self.provider.rent(self.spec.name, self.spec.provider, self.spec.policy.lease / 3600)
+            ident, dollars = self.provider.rent(self.spec.name, self.spec.provider, self.spec.policy.lease / 3600,
+                                                action.avoid)
         except RentError as error:
             self.event("rent_failed", detail=str(error))
             self.facts.append(RentFailed(str(error)))
@@ -206,8 +213,9 @@ class Controller:
             return
         url = self.store.presign("GET", self.code["key"], self.spec.policy.url)
         code = {"url": url, "sha256": self.code["sha256"], "bytes": self.code["bytes"]}
-        if self.ask(action.machine, "install", {"code": code, "setup": [list(item) for item in self.spec.setup]}) \
-                is not None:
+        payload = {"code": code, "setup": [list(item) for item in self.spec.setup],
+                   "check": [list(item) for item in self.spec.check]}
+        if self.ask(action.machine, "install", payload) is not None:
             self.event("installing", machine=action.machine)
 
     def start(self, action):
@@ -217,7 +225,8 @@ class Controller:
         steps = [{"name": step.name, "command": list(step.command), "environment": step.environment,
                   "outputs": list(step.outputs)}
                  for step in self.record.remaining(self.spec)]
-        payload = {"files": files, "steps": steps, "rate_seconds": self.spec.policy.rate_window}
+        payload = {"files": files, "steps": steps, "check": [list(item) for item in self.spec.check],
+                   "rate_seconds": self.spec.policy.rate_window}
         if self.ask(action.machine, "start", payload) is not None:
             self.event("started", machine=action.machine, steps=[step["name"] for step in steps], files=len(files))
 
@@ -285,6 +294,10 @@ class Controller:
         self.facts.append(Released(action.machine, dollars))
         self.event("released", machine=action.machine, reason=action.reason, rejected=action.reject,
                    dollars=dollars)
+
+    def reject(self, action):
+        self.provider.reject(action.machine, action.reason)
+        self.event("rejected", machine=action.machine, reason=action.reason)
 
     def end(self, action):
         self.event("ended", outcome=action.outcome, detail=action.detail, dollars=round(self.memory.spending(), 4))

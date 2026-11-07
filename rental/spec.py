@@ -7,6 +7,9 @@ A run lives in a directory whose spec.json holds:
   store     where the files go: {"kind": "r2", "bucket": ..., "prefix": ...}
   code      the job's code, a tarball in the run's directory: {"path": "code.tar.gz"}
   setup     commands run in the code on each machine before any step: [[argument, ...], ...]
+  check     commands that pass on a machine that computes as it should, run after the setup and
+            again whenever a step fails: [[argument, ...], ...]; a machine that passed them and
+            then fails them is what broke
   files     files already in the store that steps read: [{"path", "key", "sha256", "bytes"}]
   steps     [{"name", "command", "environment", "inputs", "outputs", "rate", "units"}], in order: a
             step's command runs in the code with the environment's variables added; it reads
@@ -36,9 +39,11 @@ class Policy:
     # once the store's key has less than this left.
     url: float = 6 * HOUR
     unreachable: float = 15 * 60.0
+    # The most a machine's install may take, and the check after a step failed on it.
     install: float = 60 * 60.0
     # A step goes slow below slow_ratio of its rate for `slow`, from `warmup` after it
-    # started; its machine is replaced when that saves more than `replace`.
+    # started, which leaves the job its own start, as compiling; its machine is replaced
+    # when that saves more than `replace`.
     slow_ratio: float = 0.85
     slow: float = 30 * 60.0
     warmup: float = 30 * 60.0
@@ -51,10 +56,11 @@ class Policy:
     send_attempts: int = 5
     handover: float = 30 * 60.0
     part_bytes: int = 1 << 30
-    # A job that stops by itself starts again this many times on one machine.
+    # A job that stops by itself starts again this many times on one machine, and then the run fails.
     restarts: int = 2
-    # The run fails when a step fails on this many machines, the setup on this many, or renting this many times
-    # running otherwise than for want of an offer.
+    # The run fails when a step fails this many times on machines that pass their check, the install fails
+    # on this many machines before any passes it, or renting fails this many times running otherwise than
+    # for want of an offer.
     step_failures: int = 2
     install_failures: int = 2
     rent_failures: int = 2
@@ -79,6 +85,7 @@ class Spec:
     store: dict
     code: str
     setup: tuple
+    check: tuple
     files: tuple
     steps: tuple
     policy: Policy = field(default_factory=Policy)
@@ -99,6 +106,7 @@ class Spec:
         spec = cls(
             name=value["name"], provider=value["provider"], store=value["store"], code=value["code"]["path"],
             setup=tuple(tuple(command) for command in value.get("setup", [])),
+            check=tuple(tuple(command) for command in value.get("check", [])),
             files=tuple(dict(item) for item in value.get("files", [])),
             steps=tuple(
                 Step(item["name"], tuple(item["command"]), dict(item.get("environment", {})),
@@ -108,14 +116,14 @@ class Spec:
             ),
             policy=Policy(**policy),
         )
-        spec.check()
+        spec.validate()
         return spec
 
     @classmethod
     def load(cls, path):
         return cls.read(json.loads(path.read_text()))
 
-    def check(self):
+    def validate(self):
         def relative(path):
             parts = PurePosixPath(path).parts
             if not parts or PurePosixPath(path).is_absolute() or ".." in parts:

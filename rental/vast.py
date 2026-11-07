@@ -37,10 +37,12 @@ class VastProvider:
         answers = [json.loads(line) for line in ran.stdout.splitlines() if line.startswith("{")]
         return ran.returncode, answers, (ran.stderr.strip().splitlines() or [""])[-1]
 
-    def rent(self, label, needs, hours):
+    def rent(self, label, needs, hours, avoid=()):
         arguments = ["rent", needs["gpu"], "--image", needs["image"], "--label", label, "--hours", f"{hours:g}",
                      "--disk", str(needs["disk"]), "--max-price", str(needs["max_price"]),
                      "--tries", str(needs.get("tries", 6))]
+        if avoid:
+            arguments += ["--avoid", ",".join(avoid)]
         if needs.get("query"):
             arguments += ["--query", json.dumps(needs["query"])]
         if needs.get("min_download") is not None:

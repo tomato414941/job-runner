@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from rental.controller import Controller, etag
-from rental.decide import Install, Keep, KeepFailed, RentFailed, Send
+from rental.decide import Install, Keep, KeepFailed, Reject, RentFailed, Send, Start
 from rental.local import LocalStore
 from rental.provider import RentError
 
@@ -18,14 +18,17 @@ class StubProvider:
     and rents nothing."""
 
     def __init__(self):
-        self.ran, self.answers, self.listed, self.rented = [], {}, [], []
+        self.ran, self.answers, self.listed, self.rented, self.rejected = [], {}, [], [], []
 
     def machines(self, label):
         return self.listed
 
-    def rent(self, label, needs, hours):
-        self.rented.append(label)
+    def rent(self, label, needs, hours, avoid=()):
+        self.rented.append((label, avoid))
         raise RentError("the image did not start")
+
+    def reject(self, ident, reason):
+        self.rejected.append((ident, reason))
 
     def run(self, ident, command, data, timeout):
         self.ran.append((ident, command, data))
@@ -43,6 +46,7 @@ class ControllerTests(unittest.TestCase):
         (self.root / "spec.json").write_text(json.dumps({
             "name": "run", "provider": {}, "store": {"prefix": PREFIX}, "code": {"path": "code.tar.gz"},
             "files": [{"path": "data/a.bin", "key": "data/a.bin", "sha256": "a", "bytes": 4}],
+            "setup": [["sh", "setup.sh"]], "check": [["python3", "check.py"]],
             "steps": [{"name": "first", "command": ["x"], "inputs": ["data/a.bin"], "outputs": ["out/a.pt"]}],
             "policy": {"part_bytes": 4},
         }))
@@ -89,6 +93,27 @@ class ControllerTests(unittest.TestCase):
     def test_tells_decide_when_renting_failed_otherwise_than_for_want_of_an_offer(self):
         self.controller.tick()
         self.assertEqual(self.controller.facts, [RentFailed("the image did not start")])
+
+    def test_gives_the_machine_its_check_with_the_install_and_with_each_start(self):
+        self.controller.code = {"key": "code", "sha256": "c", "bytes": 4}
+        self.controller.install(Install("m1"))
+        self.controller.start(Start("m1"))
+        # The agent's own files go first, as a tarball; the commands' payloads are JSON.
+        install, start = (json.loads(data) for _, _, data in self.provider.ran if data and data.startswith(b"{"))
+        self.assertEqual((install["setup"], install["check"]), ([["sh", "setup.sh"]], [["python3", "check.py"]]))
+        self.assertEqual(start["check"], [["python3", "check.py"]])
+
+    def test_takes_up_a_request_to_stop_written_beside_the_run(self):
+        (self.root / "stop").write_text(json.dumps({"reason": "the spec is wrong"}))
+        self.controller.tick()
+        self.assertEqual((self.controller.memory.outcome, self.controller.memory.detail, self.controller.memory.ended),
+                         ("stopped", "the spec is wrong", True))
+        self.assertEqual(self.provider.rented, [])
+
+    def test_has_the_provider_reject_a_machine_already_released(self):
+        self.controller.reject(Reject("m1", "its install failed, which another machine of the run passed"))
+        self.assertEqual(self.provider.rejected, [("m1", "its install failed, which another machine of the run passed")])
+        self.assertEqual(self.events()[-1]["event"], "rejected")
 
     def test_takes_a_machine_without_the_agent_for_one_without_the_job(self):
         self.provider.answers["status"] = (127, "")

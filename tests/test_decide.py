@@ -1,8 +1,8 @@
 import unittest
 
 from rental.decide import (
-    End, Extend, Install, Keep, KeepFailed, Leaving, Machine, Memory, NoOffer, Release, Released, Rent, RentFailed,
-    Seen, Send, Start, Stop, Upload, decide,
+    End, Extend, Install, Keep, KeepFailed, Leaving, Machine, Memory, NoOffer, Reject, Release, Released, Rent,
+    RentFailed, Seen, Send, Start, Stop, StopAsked, Upload, decide,
 )
 from rental.record import Record
 from rental.spec import Spec
@@ -22,9 +22,15 @@ POLICY = SPEC.policy
 FAR = NOW + POLICY.lease
 
 
-def report(phase, step=None, outbox=(), rate=None, done=0, total=None, step_seconds=None, failure=None):
-    return {"phase": phase, "step": step, "outbox": list(outbox), "failure": failure, "step_seconds": step_seconds,
+def report(phase, step=None, outbox=(), rate=None, done=0, total=None, seconds=None, failure=None):
+    return {"phase": phase, "step": step, "outbox": list(outbox), "failure": failure, "seconds": seconds,
             "progress": None if rate is None else {"done": done, "total": total, "rate": rate}}
+
+
+def failed(sound=True, at=50.0, outbox=()):
+    """An agent whose step `first` exited with 3, and whose machine passed the check afterwards or not."""
+    return report("failed", "first", outbox, failure={"step": "first", "exit_code": 3, "sound": sound, "at": at,
+                                                       "check": None if sound else "python ended with 1: no GPU"})
 
 
 def seen(answer, cost=0.1, deadline=FAR):
@@ -182,8 +188,8 @@ class DecideTests(unittest.TestCase):
 
     # Slow machines
 
-    def slow(self, done=0, total=1_000_000, step_seconds=POLICY.warmup, slow_since=NOW - POLICY.slow):
-        answer = report("working", "first", rate=30.0, done=done, total=total, step_seconds=step_seconds)
+    def slow(self, done=0, total=1_000_000, seconds=POLICY.warmup, slow_since=NOW - POLICY.slow):
+        answer = report("working", "first", rate=30.0, done=done, total=total, seconds=seconds)
         return self.decide({"m1": seen(answer)}, working(slow_since=slow_since))
 
     def test_hands_over_a_machine_well_below_its_step_rate_when_a_new_one_saves_time(self):
@@ -196,7 +202,7 @@ class DecideTests(unittest.TestCase):
         self.assertEqual(actions, [])
 
     def test_bears_with_a_slow_start_during_the_warmup(self):
-        actions, memory = self.slow(step_seconds=POLICY.warmup - 1)
+        actions, memory = self.slow(seconds=POLICY.warmup - 1)
         self.assertEqual(actions, [])
         self.assertIsNone(memory.machines["m1"].slow_since)
 
@@ -217,31 +223,58 @@ class DecideTests(unittest.TestCase):
 
     # Failures
 
-    def test_rejects_a_machine_a_step_failed_on_once_its_files_are_kept(self):
-        failed = report("failed", "first", failure={"step": "first", "exit_code": 3})
-        actions, memory = self.decide({"m1": seen(failed)}, working())
-        self.assertEqual(actions, [Release("m1", "first failed on it", True), Rent()])
-        self.assertEqual(memory.failures, {"first": 1})
+    def test_runs_a_failed_step_again_on_a_machine_that_still_passes_its_check(self):
+        actions, memory = self.decide({"m1": seen(failed())}, working())
+        self.assertEqual(actions, [Start("m1")])
+        self.assertEqual((memory.failures, memory.machines["m1"].failure), ({"first": 1}, 50.0))
 
-    def test_keeps_a_failed_step_files_before_releasing_its_machine(self):
-        failed = report("failed", "first", [entry("l1", kind="log")], failure={"step": "first", "exit_code": 3})
-        actions, _ = self.decide({"m1": seen(failed)}, working())
-        self.assertEqual(actions, [Send("m1", ("l1",))])
+    def test_counts_a_failure_once_and_starts_again_when_its_new_start_did_not_arrive(self):
+        actions, memory = self.decide({"m1": seen(failed())}, working(failure=50.0))
+        self.assertEqual(actions, [Start("m1")])
+        self.assertEqual((memory.failures, memory.machines["m1"].restarts), ({}, 1))
 
-    def test_ends_the_run_failed_when_a_step_fails_on_a_second_machine(self):
+    def test_ends_the_run_failed_when_a_step_fails_again_on_a_machine_that_passes_its_check(self):
+        memory = working(failure=10.0)
+        memory.failures["first"] = 1
+        actions, memory = self.decide({"m1": seen(failed())}, memory)
+        self.assertEqual(actions, [Release("m1", "failed", False)])
+        self.assertEqual((memory.outcome, memory.detail),
+                         ("failed", "first failed 2 times on machines that pass their check"))
+
+    def test_rejects_a_machine_that_fails_its_check_after_a_step_and_carries_the_step_on_elsewhere(self):
         memory = working()
         memory.failures["first"] = 1
-        failed = report("failed", "first", failure={"step": "first", "exit_code": 3})
-        actions, memory = self.decide({"m1": seen(failed)}, memory)
-        self.assertEqual(actions, [Release("m1", "failed", False)])
-        self.assertEqual((memory.outcome, memory.detail), ("failed", "first failed on 2 machines"))
+        actions, memory = self.decide({"m1": seen(failed(sound=False))}, memory)
+        self.assertEqual(actions, [
+            Release("m1", "it failed its check after first failed: python ended with 1: no GPU", True), Rent()])
+        self.assertEqual((memory.failures, memory.outcome), ({"first": 1}, None))
 
-    def test_starts_again_a_job_that_stopped_by_itself_and_gives_up_its_machine_after_too_many_times(self):
+    def test_keeps_a_failed_step_files_before_anything_else(self):
+        actions, _ = self.decide({"m1": seen(failed(sound=False, outbox=[entry("l1", kind="log")]))}, working())
+        self.assertEqual(actions, [Send("m1", ("l1",))])
+
+    def test_waits_while_the_agent_checks_the_machine_after_a_step_failed(self):
+        checking = report("checking", "first", [entry("c1", kind="checkpoint")], seconds=POLICY.install - 1)
+        actions, _ = self.decide({"m1": seen(checking)}, working(), checkpoint_kept(NOW - 10))
+        self.assertEqual(actions, [Send("m1", ("c1",))])
+
+    def test_rejects_a_machine_whose_check_after_a_failed_step_hangs(self):
+        actions, _ = self.decide({"m1": seen(report("checking", "first", seconds=POLICY.install + 1))}, working())
+        self.assertEqual(actions, [Release("m1", "its check took too long after first failed", True), Rent()])
+
+    def test_starts_again_a_job_that_stopped_by_itself_and_fails_the_run_when_it_keeps_stopping(self):
         actions, memory = self.decide({"m1": seen(report("crashed", "first"))}, working())
         self.assertEqual(actions, [Start("m1")])
         self.assertEqual(memory.machines["m1"].restarts, 1)
-        actions, _ = self.decide({"m1": seen(report("crashed", "first"))}, working(restarts=POLICY.restarts))
-        self.assertEqual(actions, [Release("m1", "its job stopped by itself (crashed), again", True), Rent()])
+        actions, memory = self.decide({"m1": seen(report("crashed", "first"))}, working(restarts=POLICY.restarts))
+        self.assertEqual(actions, [Release("m1", "failed", False)])
+        self.assertEqual(memory.detail, "its job stopped by itself (crashed), 3 times on one machine")
+
+    def test_keeps_what_a_machine_holds_before_failing_the_run_for_a_job_that_keeps_stopping(self):
+        idle = report("ready", outbox=[entry("c1", kind="checkpoint")])
+        actions, memory = self.decide({"m1": seen(idle)}, working(restarts=POLICY.restarts))
+        self.assertEqual(actions, [Send("m1", ("c1",))])
+        self.assertIsNone(memory.outcome)
 
     def test_keeps_what_a_job_left_before_starting_it_again(self):
         actions, memory = self.decide({"m1": seen(report("crashed", "first", [entry("c1", kind="checkpoint")]))},
@@ -253,18 +286,40 @@ class DecideTests(unittest.TestCase):
         actions, _ = self.decide({"m1": seen("finished")}, working())
         self.assertEqual(actions, [Start("m1")])
 
-    def test_rejects_a_machine_whose_setup_failed_and_ends_the_run_when_it_fails_again(self):
-        actions, memory = self.decide({"m1": seen("install_failed")}, working(state="installing"))
-        self.assertEqual(actions, [Release("m1", "its setup failed", True), Rent()])
-        memory.machines["m2"] = Machine("installing", NOW)
-        actions, memory = self.decide({"m2": seen("install_failed")}, memory)
-        self.assertEqual(actions, [Release("m2", "failed", False)])
-        self.assertEqual(memory.detail, "the setup failed on 2 machines")
+    def install_failed(self, ident, memory):
+        answer = report("install_failed", failure={"error": "RuntimeError", "detail": "the check failed: no GPU"})
+        memory.machines[ident] = Machine("installing", NOW)
+        return self.decide({ident: seen(answer)}, memory)
 
-    def test_releases_a_machine_whose_setup_takes_too_long(self):
+    def test_sends_back_unrejected_a_machine_whose_install_fails_before_any_passed_and_rents_another_instead(self):
+        actions, memory = self.install_failed("m1", Memory())
+        self.assertEqual(actions, [Release("m1", "its install failed: the check failed: no GPU", False),
+                                   Rent(("m1",))])
+        self.assertEqual(memory.install_failures, 1)
+
+    def test_rejects_a_machine_whose_install_failed_once_another_passes_it(self):
+        _, memory = self.install_failed("m1", Memory())
+        actions, memory = self.decide({"m2": seen("ready")}, memory)
+        self.assertEqual(actions, [
+            Reject("m1", "its install failed: the check failed: no GPU, which another machine of the run passed"),
+            Start("m2")])
+        self.assertEqual((memory.suspects, memory.installed), ({}, True))
+
+    def test_rejects_a_machine_whose_install_fails_after_another_passed_it(self):
+        actions, memory = self.install_failed("m2", Memory(installed=True))
+        self.assertEqual(actions, [Release("m2", "its install failed: the check failed: no GPU", True), Rent()])
+        self.assertEqual(memory.install_failures, 0)
+
+    def test_ends_the_run_failed_when_the_install_fails_on_machines_and_passes_on_none_rejecting_none(self):
+        _, memory = self.install_failed("m1", Memory())
+        actions, memory = self.install_failed("m2", memory)
+        self.assertEqual(actions, [Release("m2", "failed", False)])
+        self.assertEqual(memory.detail, "the install failed on 2 machines and passed on none")
+
+    def test_rejects_a_machine_whose_install_takes_too_long(self):
         memory = working(state="installing", since=NOW - POLICY.install - 1)
         actions, _ = self.decide({"m1": seen("installing")}, memory)
-        self.assertEqual(actions, [Release("m1", "its setup took too long", True), Rent()])
+        self.assertEqual(actions, [Release("m1", "its install took too long", True), Rent()])
 
     def test_waits_while_no_offer_fits(self):
         actions, memory = self.decide({}, facts=[NoOffer()])
@@ -296,6 +351,24 @@ class DecideTests(unittest.TestCase):
         self.assertEqual(actions, [Release("m1", "over budget", False)])
         self.assertEqual(memory.detail, "10.10 dollars spent")
 
+    def test_hands_over_every_machine_when_asked_to_stop_and_rents_no_other(self):
+        memory = working()
+        memory.machines["m2"] = Machine("installing", NOW)
+        world = {"m1": seen(report("working", "first")), "m2": seen("installing")}
+        actions, memory = self.decide(world, memory, facts=[StopAsked("asked to stop")])
+        self.assertEqual(actions, [Stop("m1"), Stop("m2"), Release("m2", "the run stops: asked to stop", False)])
+        self.assertEqual((memory.machines["m1"].state, memory.machines["m1"].reject, memory.outcome),
+                         ("handing", False, None))
+
+    def test_ends_the_run_stopped_once_its_machines_handed_over_and_are_gone(self):
+        memory = working(state="handing", reason="the run stops: asked to stop")
+        memory.stopping = "asked to stop"
+        actions, memory = self.decide({"m1": seen(report("stopped", "first"))}, memory)
+        self.assertEqual(actions, [Release("m1", "the run stops: asked to stop", False)])
+        self.assertEqual((memory.outcome, memory.detail), ("stopped", "asked to stop"))
+        actions, memory = self.decide({}, memory)
+        self.assertEqual(actions, [End("stopped", "asked to stop")])
+
     def test_releases_a_machine_it_did_not_know_of_once_the_run_has_its_outcome(self):
         memory = Memory(outcome="complete", detail="every step's outputs are in the store")
         actions, memory = self.decide({"m9": seen("ready")}, memory)
@@ -322,9 +395,11 @@ class DecideTests(unittest.TestCase):
         self.assertEqual(actions, [])
 
     def test_remembers_what_it_decided_across_a_restart(self):
-        memory = working()
+        memory = working(failure=50.0)
         memory.leaving["m0"] = Leaving(NOW - 5, 0.3)
         memory.uploads["o1"] = Upload("m1", NOW - 5, 1, True)
+        memory.suspects["m0"] = "its install failed: no GPU"
+        memory.stopping = "asked to stop"
         self.assertEqual(Memory.read(memory.write()), memory)
 
 

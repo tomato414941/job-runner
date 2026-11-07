@@ -4,6 +4,8 @@ train steps at the speed its machine sets in RENTAL_SPEED, reports its progress,
 saves its checkpoint every few steps and keeps it, takes up from its own
 checkpoint when run again, saves and keeps on SIGTERM, and can fail at a step.
 evaluate writes the step of the checkpoint it reads, unless it already has.
+check passes on a machine whose GPU works; train fails on one whose GPU is lost,
+which a rehearsal marks with the file `broken` in the machine's HOME.
 """
 
 import argparse
@@ -25,6 +27,10 @@ def keep(path):
         temporary = Path(directory) / f".{quote(str(path), safe='')}.{os.getpid()}"
         os.link(path, temporary)
         os.replace(temporary, Path(directory) / quote(str(path), safe=""))
+
+
+def gpu_lost():
+    return (Path.home() / "broken").exists()
 
 
 def progress(done, total):
@@ -61,6 +67,8 @@ def train(args):
     print(json.dumps({"event": "start", "resumed_from": start}), flush=True)
     for step in range(start + 1, args.steps + 1):
         time.sleep(SECONDS_PER_STEP / speed)
+        if gpu_lost():
+            sys.exit("no CUDA GPUs are available")
         progress(step * UNITS_PER_STEP, args.steps * UNITS_PER_STEP)
         if step == args.fail_at:
             sys.exit(3)
@@ -76,6 +84,11 @@ def train(args):
 
 def setup(_args):
     Path("environment").write_text("ready\n")
+
+
+def check(_args):
+    if gpu_lost():
+        sys.exit("no CUDA GPUs are available")
 
 
 def evaluate(args):
@@ -99,6 +112,7 @@ def main():
     training.add_argument("--fail-at", type=int)
     training.set_defaults(function=train)
     commands.add_parser("setup").set_defaults(function=setup)
+    commands.add_parser("check").set_defaults(function=check)
     evaluation = commands.add_parser("evaluate")
     evaluation.add_argument("--checkpoint", required=True)
     evaluation.add_argument("--output", required=True)
