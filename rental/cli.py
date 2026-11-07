@@ -6,10 +6,12 @@
   rental wait DIRECTORY     wait until the run is over; exit 0 when it is complete
 
 run keeps its memory, a copy of the record and a log of what it did,
-events.jsonl, in the directory, and exits 0 once the run is over. It needs the
-store's key in its environment, as r2.py says, and what the provider needs, as
-vast.py says. It exits 75 when the store's key would expire before a URL it
-gives, so that it runs best as a service that starts it again with new keys:
+events.jsonl, in the directory, and exits 0 once the run is over. It takes the
+store's key from AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_ENDPOINT_URL,
+with AWS_SESSION_TOKEN and AWS_CREDENTIAL_EXPIRATION for a temporary key, and
+reaches the provider's machines with the SSH key in the file VAST_SSH_KEY_FILE
+names. It exits 75 when the store's key would expire before a URL it gives, so
+it runs best as a service that starts it again with new keys:
   systemd-run --user --unit rental-NAME -p Restart=on-failure -p RestartSec=60 -- KEYS rental run DIRECTORY
 where KEYS is the command that gives it its keys. check needs the same keys and
 changes nothing; status and wait read the directory alone.
