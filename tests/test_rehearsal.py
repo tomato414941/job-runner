@@ -56,6 +56,7 @@ class RehearsalTests(unittest.TestCase):
                 train("second", 40, "--initialize-from", "out/first/last.pt", inputs=["out/first/last.pt"]),
                 {"name": "evaluate", "command": ["python3", "job.py", "evaluate", "--checkpoint", "out/second/last.pt",
                                                  "--output", "out/evaluation.json"],
+                 "environment": {"EVALUATED_BY": "rehearsal"},
                  "inputs": ["out/second/last.pt"], "outputs": ["out/evaluation.json"]},
             ],
             "policy": dict(POLICY),
@@ -88,7 +89,8 @@ class RehearsalTests(unittest.TestCase):
         return self.root / "machines" / machine / ".rental/logs" / f"{step}.log"
 
     def assert_run_complete(self):
-        self.assertEqual(json.loads(self.store.objects[f"{PREFIX}/outputs/out/evaluation.json"]), {"checkpoint_step": 40})
+        self.assertEqual(json.loads(self.store.objects[f"{PREFIX}/outputs/out/evaluation.json"]),
+                         {"checkpoint_step": 40, "by": "rehearsal"})
         record = json.loads(self.store.objects[f"{PREFIX}/record.json"])
         self.assertEqual(sorted(record["steps"]), ["evaluate", "first", "second"])
         last = self.store.objects[f"{PREFIX}/outputs/out/first/last.pt"]

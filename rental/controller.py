@@ -171,7 +171,8 @@ class Controller:
         seconds = self.spec.policy.url
         files = [{**item, "url": self.store.presign("GET", item["key"], seconds)}
                  for item in self.record.fetch(self.spec)]
-        steps = [{"name": step.name, "command": list(step.command), "outputs": list(step.outputs)}
+        steps = [{"name": step.name, "command": list(step.command), "environment": step.environment,
+                  "outputs": list(step.outputs)}
                  for step in self.record.remaining(self.spec)]
         if self.ask(action.machine, "start", {"files": files, "steps": steps,
                                               "rate_seconds": self.spec.policy.rate_window}):

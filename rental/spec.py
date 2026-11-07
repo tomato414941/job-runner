@@ -8,9 +8,10 @@ A run lives in a directory whose spec.json holds:
   code      the job's code, a tarball in the run's directory: {"path": "code.tar.gz"}
   setup     commands run in the code on each machine before any step: [[argument, ...], ...]
   files     files already in the store that steps read: [{"path", "key", "sha256", "bytes"}]
-  steps     [{"name", "command", "inputs", "outputs", "rate", "units"}], in order: a step reads
-            its inputs, files or earlier steps' outputs, and leaves its outputs; rate is
-            the units a second its progress is expected to go at, units how many it does
+  steps     [{"name", "command", "environment", "inputs", "outputs", "rate", "units"}], in order: a
+            step's command runs in the code with the environment's variables added; it reads
+            its inputs, files or earlier steps' outputs, and leaves its outputs; rate is the
+            units a second its progress is expected to go at, units how many it does
   policy    any of Policy's fields, to change its default
 
 Every path is relative to the code. A spec is checked when it is read: every
@@ -61,6 +62,7 @@ class Policy:
 class Step:
     name: str
     command: tuple
+    environment: dict = field(default_factory=dict)
     inputs: tuple = ()
     outputs: tuple = ()
     rate: float | None = None
@@ -96,8 +98,9 @@ class Spec:
             setup=tuple(tuple(command) for command in value.get("setup", [])),
             files=tuple(dict(item) for item in value.get("files", [])),
             steps=tuple(
-                Step(item["name"], tuple(item["command"]), tuple(item.get("inputs", [])),
-                     tuple(item.get("outputs", [])), item.get("rate"), item.get("units"))
+                Step(item["name"], tuple(item["command"]), dict(item.get("environment", {})),
+                     tuple(item.get("inputs", [])), tuple(item.get("outputs", [])), item.get("rate"),
+                     item.get("units"))
                 for item in value["steps"]
             ),
             policy=Policy(**policy),

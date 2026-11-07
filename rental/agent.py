@@ -11,7 +11,7 @@ socket and owns the job's processes: the job ends when the daemon does.
   install  {"code": {"url", "sha256", "bytes"}, "setup": [[argument, ...], ...]}
            fetch and unpack the job's code, then run its setup commands there
   start    {"files": [{"path", "url", "sha256", "bytes", "if_missing"}],
-            "steps": [{"name", "command", "outputs"}]}
+            "steps": [{"name", "command", "environment", "outputs"}]}
            fetch the files into the code, then run the steps in order
   send     {"uploads": [{"id", "url"} | {"id", "upload", "parts": [{"number", "start", "length", "url"}]}]}
            upload outbox files where told
@@ -263,7 +263,7 @@ class Daemon:
         report["disk_free"] = shutil.disk_usage(HOME).free
         return report
 
-    def run(self, command, log):
+    def run(self, command, log, environment=None):
         """Run a command in the code, its output appended to log, unless stopping; return its exit code."""
         with self.lock:
             if self.stopping:
@@ -272,7 +272,8 @@ class Daemon:
                 self.process = subprocess.Popen(
                     [sys.executable, "-c", WITH_PARENT, str(os.getpid()), *command], cwd=CODE, stdout=output,
                     stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                    env={**os.environ, "RENTAL_PROGRESS": str(PROGRESS), "RENTAL_KEEP": str(KEEP)},
+                    env={**os.environ, **(environment or {}), "RENTAL_PROGRESS": str(PROGRESS),
+                         "RENTAL_KEEP": str(KEEP)},
                 )
         process = self.process
         observations = deque()
@@ -364,7 +365,7 @@ class Daemon:
                 self.phase, self.step, self.progress, self.started = "working", step["name"], None, time.time()
             PROGRESS.unlink(missing_ok=True)
             log = LOGS / f"{step['name']}.log"
-            code = self.run(step["command"], log)
+            code = self.run(step["command"], log, step.get("environment"))
             self.keep_scan(step["name"])
             if self.stopping or code != 0:
                 self.enqueue("log", step["name"], log, f".rental/logs/{step['name']}.log")

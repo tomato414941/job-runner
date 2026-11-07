@@ -82,7 +82,8 @@ def evaluate(args):
     output = Path(args.output)
     if not output.exists():
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(json.dumps({"checkpoint_step": saved_step(args.checkpoint)}) + "\n")
+        output.write_text(json.dumps({"checkpoint_step": saved_step(args.checkpoint),
+                                      "by": os.environ.get("EVALUATED_BY")}) + "\n")
 
 
 def main():
