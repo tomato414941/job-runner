@@ -47,6 +47,8 @@ def saved_step(path):
 
 
 def train(args):
+    if not Path("environment").exists():
+        raise SystemExit("the setup did not run")
     checkpoint = Path(args.output) / "last.pt"
     for given in (args.data, args.initialize_from):
         if given and not checkpoint.exists() and not Path(given).exists():
@@ -72,6 +74,10 @@ def train(args):
                 keep(checkpoint)
 
 
+def setup(_args):
+    Path("environment").write_text("ready\n")
+
+
 def evaluate(args):
     output = Path(args.output)
     if not output.exists():
@@ -91,6 +97,7 @@ def main():
     training.add_argument("--initialize-from")
     training.add_argument("--fail-at", type=int)
     training.set_defaults(function=train)
+    commands.add_parser("setup").set_defaults(function=setup)
     evaluation = commands.add_parser("evaluate")
     evaluation.add_argument("--checkpoint", required=True)
     evaluation.add_argument("--output", required=True)

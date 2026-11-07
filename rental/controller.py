@@ -136,6 +136,8 @@ class Controller:
     def status(self, ident):
         report = self.ask(ident, "status")
         if report is not None:
+            if ident not in self.reports and report.get("gpus"):
+                self.event("machine", machine=ident, gpus=report["gpus"], disk_free=report.get("disk_free"))
             self.reports[ident] = report
         return report
 
@@ -203,7 +205,11 @@ class Controller:
             # and an older file at the key is not taken for this one.
             expected = etag(entry["etags"])
             if entry.get("upload") and self.store.etag(key) != expected:
-                self.store.finish_upload(key, entry["upload"], entry["etags"])
+                try:
+                    self.store.finish_upload(key, entry["upload"], entry["etags"])
+                except (OSError, ValueError, KeyError):
+                    # As for an upload the store no longer knows; the file goes again.
+                    pass
             if self.store.etag(key) != expected:
                 self.event("keep_failed", machine=action.machine, kind=entry["kind"], step=entry["step"])
                 self.facts.append(KeepFailed(action.machine, id_))

@@ -48,6 +48,7 @@ class RehearsalTests(unittest.TestCase):
         self.spec = {
             "name": "rehearsal", "provider": {"kind": "local"}, "store": {"kind": "local", "prefix": PREFIX},
             "code": {"path": "code.tar.gz"},
+            "setup": [["python3", "job.py", "setup"]],
             "files": [{"path": "data/corpus.bin", "key": "data/corpus.bin",
                        "sha256": hashlib.sha256(corpus).hexdigest(), "bytes": len(corpus)}],
             "steps": [

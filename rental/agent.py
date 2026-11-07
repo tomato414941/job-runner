@@ -43,6 +43,7 @@ import sys
 import tarfile
 import threading
 import time
+import traceback
 import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -206,7 +207,7 @@ class Daemon:
                        for entry in saved.get("outbox", [])}
         self.seen = set(saved.get("seen", []))
         self.phase = "ready" if INSTALLED.exists() else "empty"
-        self.step, self.done, self.failure, self.progress, self.started = None, [], None, None, None
+        self.step, self.failure, self.progress, self.started = None, None, None, None
         self.worker, self.process, self.stopping = None, None, False
         # How often the daemon looks at the job, and over how long it reckons its rate.
         self.poll, self.window = 2.0, 600.0
@@ -228,7 +229,7 @@ class Daemon:
             with self.lock:
                 if self.worker and self.worker.is_alive():
                     return {"accepted": False, "phase": self.phase}
-                self.worker = threading.Thread(target=getattr(self, command), args=(payload,), daemon=True)
+                self.worker = threading.Thread(target=self.work, args=(command, payload), daemon=True)
                 self.worker.start()
                 return {"accepted": True}
         if command == "send":
@@ -254,11 +255,10 @@ class Daemon:
     def status(self):
         with self.lock:
             report = {
-                "phase": self.phase, "step": self.step, "done": list(self.done), "failure": self.failure,
+                "phase": self.phase, "step": self.step, "failure": self.failure,
                 "step_seconds": time.time() - self.started if self.step and self.started else None,
                 "progress": self.progress, "outbox": [dict(entry) for entry in self.outbox.values()],
             }
-        report["code"] = INSTALLED.read_text().strip() if INSTALLED.exists() else None
         report["gpus"] = gpus()
         report["disk_free"] = shutil.disk_usage(HOME).free
         return report
@@ -308,15 +308,25 @@ class Daemon:
             self.progress = {"done": done, "total": reported.get("total"), "rate": rate,
                              "changed_at": observations[-1][0]}
 
+    def work(self, command, payload):
+        """Install or start; whatever breaks it unforeseen ends it in a phase the controller acts on."""
+        try:
+            getattr(self, command)(payload)
+        except Exception as error:  # A worker has no caller; the controller learns of it from the phase.
+            traceback.print_exc()
+            with self.lock:
+                self.phase = "install_failed" if command == "install" else "crashed"
+                self.failure = {"error": type(error).__name__}
+
     def install(self, payload):
-        code = payload["code"]
+        source = payload["code"]
         with self.lock:
             self.phase, self.failure, self.stopping = "installing", None, False
         try:
-            if not (INSTALLED.exists() and INSTALLED.read_text().strip() == code["sha256"] and CODE.exists()):
+            if not (INSTALLED.exists() and INSTALLED.read_text().strip() == source["sha256"] and CODE.exists()):
                 INSTALLED.unlink(missing_ok=True)
                 archive = HOME / "code.tar.gz"
-                download(code["url"], archive, code["sha256"], code["bytes"])
+                download(source["url"], archive, source["sha256"], source["bytes"])
                 unpacked = HOME / "code.new"
                 shutil.rmtree(unpacked, ignore_errors=True)
                 with tarfile.open(archive) as bundle:
@@ -325,10 +335,10 @@ class Daemon:
                 unpacked.rename(CODE)
                 archive.unlink()
             for command in payload.get("setup", []):
-                code = self.run(command, LOGS / "setup.log")
-                if code != 0:
-                    raise RuntimeError(f"setup ended with {code}: {command[0]}")
-            INSTALLED.write_text(code["sha256"] + "\n")
+                exit_code = self.run(command, LOGS / "setup.log")
+                if exit_code != 0:
+                    raise RuntimeError(f"setup ended with {exit_code}: {command[0]}")
+            INSTALLED.write_text(source["sha256"] + "\n")
             with self.lock:
                 self.phase = "ready"
         except (OSError, ValueError, RuntimeError, HTTPException, tarfile.TarError) as error:
@@ -337,7 +347,7 @@ class Daemon:
 
     def start(self, payload):
         with self.lock:
-            self.phase, self.failure, self.done, self.stopping = "fetching", None, [], False
+            self.phase, self.failure, self.stopping = "fetching", None, False
             self.window = payload.get("rate_seconds", self.window)
             self.poll = min(2.0, self.window / 10)
         try:
@@ -372,8 +382,6 @@ class Daemon:
             for item in outputs:
                 self.enqueue("output", step["name"], item, str(item.relative_to(CODE)), listed)
             self.enqueue("log", step["name"], log, f".rental/logs/{step['name']}.log", listed)
-            with self.lock:
-                self.done.append(step["name"])
         with self.lock:
             self.phase, self.step = "finished", None
 
@@ -440,29 +448,34 @@ class Daemon:
             upload = self.uploads.get()
             with self.lock:
                 entry = self.outbox.get(upload["id"])
-            if not entry or entry["state"] != "sending":
-                continue
-            link = OUTBOX / entry["id"]
-            try:
-                if "url" in upload:
-                    etags = [[0, put(link, upload["url"], 0, entry["bytes"])]]
-                    if etags[0][1] != entry["md5"]:
+            if entry and entry["state"] == "sending":
+                self.send(upload, entry)
+
+    def send(self, upload, entry):
+        """Upload one file, whole or in parts, checking each ETag; whatever goes wrong fails this upload alone."""
+        link = OUTBOX / entry["id"]
+        try:
+            if "url" in upload:
+                etags = [[0, put(link, upload["url"], 0, entry["bytes"])]]
+                if etags[0][1] != entry["md5"]:
+                    raise ValueError("the store received other bytes")
+            else:
+                etags = []
+                for part in upload["parts"]:
+                    expected = digests(link, part["start"], part["length"])[1]
+                    etag = put(link, part["url"], part["start"], part["length"])
+                    if etag != expected:
                         raise ValueError("the store received other bytes")
-                else:
-                    etags = []
-                    for part in upload["parts"]:
-                        expected = digests(link, part["start"], part["length"])[1]
-                        etag = put(link, part["url"], part["start"], part["length"])
-                        if etag != expected:
-                            raise ValueError("the store received other bytes")
-                        etags.append([part["number"], etag])
-                changes = {"state": "sent", "upload": upload.get("upload"), "etags": etags}
-            except (OSError, ValueError, HTTPException) as error:
-                changes = {"state": "failed", "error": type(error).__name__}
-            with self.lock:
-                if self.outbox.get(entry["id"], {}).get("state") == "sending":
-                    self.outbox[entry["id"]].update(changes)
-            self.save()
+                    etags.append([part["number"], etag])
+            changes = {"state": "sent", "upload": upload.get("upload"), "etags": etags}
+        except Exception as error:  # The sender serves on; the controller sends the file again.
+            if not isinstance(error, (OSError, ValueError, HTTPException)):
+                traceback.print_exc()
+            changes = {"state": "failed", "error": type(error).__name__}
+        with self.lock:
+            if self.outbox.get(entry["id"], {}).get("state") == "sending":
+                self.outbox[entry["id"]].update(changes)
+        self.save()
 
 
 class Handler(socketserver.StreamRequestHandler):
