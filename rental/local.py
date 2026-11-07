@@ -20,15 +20,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from .controller import Unreachable
+from .provider import Unreachable
 
 # Every URL the local store makes carries this, so that a rehearsal can look for one written down.
 SIGNATURE = "LocalSignature"
 
 
 class LocalStore:
-    def __init__(self, max_put=64 * 1024):
-        self.max_put, self.objects, self.etags, self.uploads, self.refused, self.joined = max_put, {}, {}, {}, [], 0
+    def __init__(self, max_put=64 * 1024, expires=None):
+        self.max_put, self.expires = max_put, expires
+        self.objects, self.etags, self.uploads, self.refused, self.joined = {}, {}, {}, [], 0
         self.secret, self.lock = os.urandom(16), threading.Lock()
         store = self
 
@@ -120,6 +121,8 @@ class LocalStore:
 
     def finish_upload(self, key, upload, etags):
         with self.lock:
+            if upload not in self.uploads:
+                raise ValueError("the store knows no such upload")
             parts = self.uploads.pop(upload)["parts"]
             if sorted(parts) != [number for number, _ in etags] or any(
                     hashlib.md5(parts[number]).hexdigest() != etag for number, etag in etags):
@@ -177,7 +180,8 @@ class LocalProvider:
             for machine in self.machines_.values():
                 if not machine.get("returned") and time.time() > machine["deadline"]:
                     self.end(machine, "deadline")
-            return [{"id": ident, "cost": self.cost(machine)} for ident, machine in self.machines_.items()
+            return [{"id": ident, "cost": self.cost(machine), "deadline": machine["deadline"]}
+                    for ident, machine in self.machines_.items()
                     if machine["label"] == label and not machine.get("returned")]
 
     @staticmethod
@@ -194,7 +198,11 @@ class LocalProvider:
         return ran.returncode, ran.stdout.decode(errors="replace")
 
     def extend(self, ident, hours):
-        self.machines_[ident]["deadline"] = time.time() + hours * 3600
+        machine = self.machines_[ident]
+        if machine.get("returned"):
+            return None
+        machine["deadline"] = time.time() + hours * 3600
+        return machine["deadline"]
 
     def reject(self, ident, reason):
         self.rejected.append((ident, reason))

@@ -29,10 +29,11 @@ HOUR = 3600.0
 @dataclass(frozen=True)
 class Policy:
     tick: float = 60.0
-    # Machines are rented for `lease` and extended by it once less than `renew` is left.
+    # Machines are rented for `lease`, and their deadline moved to `lease` from now while less than `renew` is left.
     lease: float = 6 * HOUR
     renew: float = 3 * HOUR
-    # How long a URL for one transfer stays good.
+    # How long a URL for one transfer stays good; the controller stops, to be started again with a new key,
+    # once the store's key has less than this left.
     url: float = 6 * HOUR
     unreachable: float = 15 * 60.0
     install: float = 60 * 60.0
@@ -52,9 +53,11 @@ class Policy:
     part_bytes: int = 1 << 30
     # A job that stops by itself starts again this many times on one machine.
     restarts: int = 2
-    # The run fails when a step fails on this many machines, or the setup on this many.
+    # The run fails when a step fails on this many machines, the setup on this many, or renting this many times
+    # running otherwise than for want of an offer.
     step_failures: int = 2
     install_failures: int = 2
+    rent_failures: int = 2
     budget: float | None = None
 
 

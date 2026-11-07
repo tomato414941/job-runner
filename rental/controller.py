@@ -1,12 +1,14 @@
-"""Carry a run to its end: observe, decide, act, until it is complete, failed or over its budget.
+"""Carry a run to its end: observe, decide, act, until the run is over.
 
 The controller is the run's only authority. It alone holds the store's key: a
 machine gets a presigned URL for each transfer when the transfer is due, on
 standard input, and only the controller writes the record, the run's truth, to
-the store. Its memory and a log of what it did stay in the run's directory,
-beside spec.json. Whatever it does not expect stops it; started again, it takes
-the run up from the record and its memory, and the machines it no longer watches
-go back at their deadlines.
+the store. Its memory and a log of what it did, events.jsonl, stay in the run's
+directory beside spec.json. Whatever it does not expect stops it; started again,
+it takes the run up from the record and its memory, and the machines it no
+longer watches go back at their deadlines. It stops as well once the store's key
+would not outlast a URL it gives, so that whatever gives it its keys starts it
+again with new ones.
 """
 
 import hashlib
@@ -17,17 +19,18 @@ import tarfile
 import time
 from pathlib import Path
 
-from .decide import End, KeepFailed, Memory, NoOffer, Released, Seen, Spent, decide
+from .decide import KeepFailed, Memory, NoOffer, Released, RentFailed, Seen, Spent, decide
+from .provider import RentError, Unreachable
 from .record import Record
 from .spec import Spec
 
 AGENT = '"$HOME/.rental/bootstrap.sh" {command}'
 SHIP = 'mkdir -p "$HOME/.rental" && tar -x -C "$HOME/.rental"'
 MACHINE_FILES = ("agent.py", "bootstrap.sh")
-
-
-class Unreachable(Exception):
-    """The machine did not answer; a command that ran and failed is not this."""
+# The shell's exit code for a command it cannot find, as the agent's entry before it is shipped.
+NOT_FOUND = 127
+# Seconds a command on a machine may take: a status answers at once, and the first command may install uv and Python.
+STATUS_SECONDS, COMMAND_SECONDS = 120, 600
 
 
 def digest(path):
@@ -63,7 +66,7 @@ class Controller:
         self.memory = Memory.read(json.loads(path.read_text()) if path.exists() else None)
         saved = store.read(self.key("record.json"))
         self.record = Record.read(json.loads(saved) if saved else None)
-        self.facts, self.reports, self.code = [], {}, None
+        self.facts, self.reports, self.code, self.unlisted = [], {}, None, False
 
     def key(self, relative):
         return f"{self.spec.prefix}/{relative}"
@@ -77,59 +80,93 @@ class Controller:
         temporary.write_text(json.dumps(self.memory.write(), indent=1) + "\n")
         temporary.replace(self.directory / "memory.json")
 
+    def missing(self):
+        """The files the steps read that the store does not hold."""
+        return [item["path"] for item in self.spec.files if self.store.size(item["key"]) != item["bytes"]]
+
+    def key_lasts(self):
+        """Whether the store's key outlasts a URL given now."""
+        return self.store.expires is None or self.store.expires - self.clock() >= self.spec.policy.url
+
+    def check(self):
+        """What would keep the run from starting now, found without renting or writing anything."""
+        problems = [] if (self.directory / self.spec.code).is_file() else [f"there is no {self.spec.code}"]
+        problems += [f"the store lacks {path}" for path in self.missing()]
+        if not self.key_lasts():
+            problems.append(f"the store's key expires within {self.spec.policy.url:g} seconds")
+        if self.provider.machines(self.spec.name) is None:
+            problems.append("the provider does not list the machines")
+        return problems
+
     def prepare(self):
         """Put the code in the store, and check it holds every file the steps read, before renting anything."""
         sha256, size = digest(self.directory / self.spec.code)
         self.code = {"key": self.key(f"code/{sha256}.tar.gz"), "sha256": sha256, "bytes": size}
         if self.store.size(self.code["key"]) != size:
             self.store.upload(self.code["key"], self.directory / self.spec.code)
-        missing = [item["path"] for item in self.spec.files if self.store.size(item["key"]) != item["bytes"]]
-        if missing:
+        if missing := self.missing():
             raise SystemExit(f"the store lacks what the steps read: {', '.join(missing)}")
 
     def run(self):
+        """Carry the run until it is over, True; False when the store's key runs out first."""
         self.prepare()
         self.event("controlling", finished=self.record.finished(self.spec))
-        while not (outcome := self.tick()):
-            self.sleep(self.spec.policy.tick)
-        return outcome
+        while not self.memory.ended:
+            if not self.key_lasts():
+                self.event("key_running_out", expires=self.store.expires)
+                return False
+            self.tick()
+            if not self.memory.ended:
+                self.sleep(self.spec.policy.tick)
+        return True
 
     def tick(self):
+        rows = self.provider.machines(self.spec.name)
+        if rows is None:
+            # Nothing is known of the machines without the provider's list; look again next time.
+            if not self.unlisted:
+                self.event("unlisted")
+            self.unlisted = True
+            return
+        self.unlisted = False
         world = {}
-        for row in self.provider.machines(self.spec.name):
+        for row in rows:
             ident = row["id"]
-            world[ident] = Seen(row["cost"], None if ident in self.memory.leaving else self.status(ident))
+            asked = not self.memory.outcome and ident not in self.memory.leaving
+            world[ident] = Seen(row["cost"], row["deadline"], self.status(ident) if asked else None)
         facts, self.facts = self.facts, []
         actions, self.memory = decide(self.spec, self.record, self.memory, world, facts, self.clock())
         for action in actions:
+            # Each action has the method of its name: Rent, rent; Keep, keep.
             getattr(self, type(action).__name__.lower())(action)
         self.save()
-        return self.memory.outcome
 
     # Commands on a machine
 
-    def remote(self, ident, command, data):
+    def remote(self, ident, command, data, seconds=COMMAND_SECONDS):
         """Run a command on a machine: its exit code and output, or None when the machine does not answer."""
         try:
-            return self.provider.run(ident, command, data, 600)
+            return self.provider.run(ident, command, data, seconds)
         except Unreachable:
             return None
 
     def ask(self, ident, command, payload=None):
         """Run an agent command: its answer, or None when the machine did not answer or the agent refused."""
-        ran = self.remote(ident, AGENT.format(command=command), None if payload is None else json.dumps(payload).encode())
+        data = None if payload is None else json.dumps(payload).encode()
+        seconds = STATUS_SECONDS if command == "status" else COMMAND_SECONDS
+        ran = self.remote(ident, AGENT.format(command=command), data, seconds)
         if ran is None:
             self.event("unanswered", machine=ident, command=command)
             return None
         code, output = ran
-        if command == "status" and code == 127:
-            # No agent there yet.
-            return {"phase": "new"}
+        if command == "status" and code == NOT_FOUND:
+            # No agent there yet, and so nothing of the job.
+            return {"phase": "empty"}
         lines = output.strip().splitlines()
         answer = json.loads(lines[-1]) if lines and lines[-1].startswith("{") else None
         if code or answer is None or "error" in answer:
             self.event("refused", machine=ident, command=command, exit_code=code,
-                       error=(answer or {}).get("error"))
+                       error=(answer or {}).get("error"), detail=(answer or {}).get("detail"))
             return None
         return answer
 
@@ -147,7 +184,12 @@ class Controller:
     # Actions
 
     def rent(self, _action):
-        ident, dollars = self.provider.rent(self.spec.name, self.spec.provider, self.spec.policy.lease / 3600)
+        try:
+            ident, dollars = self.provider.rent(self.spec.name, self.spec.provider, self.spec.policy.lease / 3600)
+        except RentError as error:
+            self.event("rent_failed", detail=str(error))
+            self.facts.append(RentFailed(str(error)))
+            return
         if dollars:
             self.facts.append(Spent(dollars))
         if ident is None:
@@ -164,7 +206,8 @@ class Controller:
             return
         url = self.store.presign("GET", self.code["key"], self.spec.policy.url)
         code = {"url": url, "sha256": self.code["sha256"], "bytes": self.code["bytes"]}
-        if self.ask(action.machine, "install", {"code": code, "setup": [list(item) for item in self.spec.setup]}):
+        if self.ask(action.machine, "install", {"code": code, "setup": [list(item) for item in self.spec.setup]}) \
+                is not None:
             self.event("installing", machine=action.machine)
 
     def start(self, action):
@@ -174,10 +217,9 @@ class Controller:
         steps = [{"name": step.name, "command": list(step.command), "environment": step.environment,
                   "outputs": list(step.outputs)}
                  for step in self.record.remaining(self.spec)]
-        if self.ask(action.machine, "start", {"files": files, "steps": steps,
-                                              "rate_seconds": self.spec.policy.rate_window}):
-            self.event("started", machine=action.machine, steps=[step["name"] for step in steps],
-                       files=len(files))
+        payload = {"files": files, "steps": steps, "rate_seconds": self.spec.policy.rate_window}
+        if self.ask(action.machine, "start", payload) is not None:
+            self.event("started", machine=action.machine, steps=[step["name"] for step in steps], files=len(files))
 
     def send(self, action):
         seconds, uploads = self.spec.policy.url, []
@@ -187,6 +229,7 @@ class Controller:
             if entry["bytes"] <= self.store.max_put:
                 uploads.append({"id": id_, "url": self.store.presign("PUT", key, seconds)})
                 continue
+            # A store takes at most 10,000 parts of an upload.
             size = max(min(self.spec.policy.part_bytes, self.store.max_put), math.ceil(entry["bytes"] / 10_000))
             upload = self.store.start_upload(key)
             uploads.append({"id": id_, "upload": upload, "parts": [
@@ -194,7 +237,7 @@ class Controller:
                  "url": self.store.presign("PUT", key, seconds, {"partNumber": number, "uploadId": upload})}
                 for number, start in enumerate(range(0, entry["bytes"], size), 1)
             ]})
-        if self.ask(action.machine, "send", {"uploads": uploads}):
+        if self.ask(action.machine, "send", {"uploads": uploads}) is not None:
             self.event("sending", machine=action.machine, files=len(uploads))
 
     def keep(self, action):
@@ -208,7 +251,7 @@ class Controller:
             if entry.get("upload") and self.store.etag(key) != expected:
                 try:
                     self.store.finish_upload(key, entry["upload"], entry["etags"])
-                except (OSError, ValueError, KeyError):
+                except (OSError, ValueError):
                     # As for an upload the store no longer knows; the file goes again.
                     pass
             if self.store.etag(key) != expected:
@@ -228,12 +271,12 @@ class Controller:
             self.ask(action.machine, "forget", {"ids": [entry["id"] for entry in kept]})
 
     def stop(self, action):
-        self.ask(action.machine, "stop")
-        self.event("stopping", machine=action.machine)
+        if self.ask(action.machine, "stop") is not None:
+            self.event("stopping", machine=action.machine)
 
     def extend(self, action):
-        self.provider.extend(action.machine, self.spec.policy.lease / 3600)
-        self.event("extended", machine=action.machine)
+        deadline = self.provider.extend(action.machine, self.spec.policy.lease / 3600)
+        self.event("extended" if deadline is not None else "unextended", machine=action.machine, deadline=deadline)
 
     def release(self, action):
         if action.reject:
@@ -243,6 +286,5 @@ class Controller:
         self.event("released", machine=action.machine, reason=action.reason, rejected=action.reject,
                    dollars=dollars)
 
-    def end(self, action: End):
-        self.event("ended", outcome=action.outcome, detail=action.detail,
-                   dollars=round(self.memory.spending(), 4))
+    def end(self, action):
+        self.event("ended", outcome=action.outcome, detail=action.detail, dollars=round(self.memory.spending(), 4))

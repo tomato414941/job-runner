@@ -17,6 +17,14 @@ socket and owns the job's processes: the job ends when the daemon does.
            upload outbox files where told
   forget   {"ids": [...]}  drop outbox files that storage now keeps
   stop     stop the step, and let the job save what it can
+A command answers with one line of JSON: the report for status, {} for the
+others, or {"error", "detail"} when the agent refuses, as it refuses an install
+or a start while it installs or runs steps.
+
+The phase says what the agent does, or how its last work ended: empty, without
+the job; installing, then ready or install_failed; fetching what the steps
+read, then working through them, then finished, failed (a step exited with
+another code than 0), stopped (told to), fetch_failed or crashed.
 
 What a job does for the run:
 - run again, a step's command finishes what is left and redoes nothing done;
@@ -25,7 +33,8 @@ What a job does for the run:
   directory RENTAL_KEEP names, under its path relative to the code with each
   "/" written "%2F", replacing that name atomically; the newest link of a path wins;
 - on SIGTERM it saves what it can, keeps it as above, and exits.
-When a step's command exits 0, its outputs and its log go to the outbox.
+When a step's command exits 0, its outputs and its log go to the outbox, and its
+checkpoints not yet on their way are dropped: nothing needs them any more.
 """
 
 import contextlib
@@ -198,6 +207,10 @@ def gpus():
     return [dict(zip(fields, (value.strip() for value in line.split(",")))) for line in listed.stdout.splitlines()]
 
 
+class Busy(Exception):
+    """The agent installs or runs steps, and takes no other install or start meanwhile."""
+
+
 class Daemon:
     def __init__(self):
         self.lock = threading.RLock()
@@ -205,7 +218,8 @@ class Daemon:
         # An upload the daemon was making when it stopped did not finish.
         self.outbox = {entry["id"]: {**entry, "state": "failed" if entry["state"] == "sending" else entry["state"]}
                        for entry in saved.get("outbox", [])}
-        self.seen = set(saved.get("seen", []))
+        # Each link in the keep directory taken into the outbox, as [name, inode, modified nanoseconds].
+        self.seen = {tuple(link) for link in saved.get("seen", [])}
         self.phase = "ready" if INSTALLED.exists() else "empty"
         self.step, self.failure, self.progress, self.started = None, None, None, None
         self.worker, self.process, self.stopping = None, None, False
@@ -228,11 +242,10 @@ class Daemon:
         if command in ("install", "start"):
             with self.lock:
                 if self.worker and self.worker.is_alive():
-                    return {"accepted": False, "phase": self.phase}
+                    raise Busy(f"the agent is {self.phase}")
                 self.worker = threading.Thread(target=self.work, args=(command, payload), daemon=True)
                 self.worker.start()
-                return {"accepted": True}
-        if command == "send":
+        elif command == "send":
             with self.lock:
                 for upload in payload["uploads"]:
                     entry = self.outbox.get(upload["id"])
@@ -240,17 +253,16 @@ class Daemon:
                         entry.update(state="sending", error=None)
                         self.uploads.put(upload)
             self.save()
-            return {"accepted": True}
-        if command == "forget":
+        elif command == "forget":
             self.forget(set(payload["ids"]))
-            return {"accepted": True}
-        if command == "stop":
+        elif command == "stop":
             with self.lock:
                 self.stopping = True
                 if self.process and self.process.poll() is None:
                     self.process.send_signal(signal.SIGTERM)
-            return {"accepted": True}
-        raise ValueError(f"no command {command}")
+        else:
+            raise ValueError(f"no command {command}")
+        return {}
 
     def status(self):
         with self.lock:
@@ -383,23 +395,24 @@ class Daemon:
             for item in outputs:
                 self.enqueue("output", step["name"], item, str(item.relative_to(CODE)), listed)
             self.enqueue("log", step["name"], log, f".rental/logs/{step['name']}.log", listed)
+            self.drop_checkpoints(step["name"])
         with self.lock:
             self.phase, self.step = "finished", None
 
     # The outbox
 
-    def enqueue(self, kind, step, source, path, outputs=None, declared=None):
+    def enqueue(self, kind, step, source, path, outputs=None, link=None):
         """Link a file into the outbox, so that the job may change it meanwhile, and list it there."""
         ident = uuid.uuid4().hex[:16]
-        link = OUTBOX / ident
-        os.link(source, link)
-        sha256, md5 = digests(link)
+        held = OUTBOX / ident
+        os.link(source, held)
+        sha256, md5 = digests(held)
         entry = {"id": ident, "kind": kind, "step": step, "path": path, "sha256": sha256, "md5": md5,
-                 "bytes": link.stat().st_size, "state": "ready", "at": time.time()}
+                 "bytes": held.stat().st_size, "state": "ready", "at": time.time()}
         if outputs is not None:
             entry["outputs"] = outputs
-        if declared is not None:
-            entry["declared"] = declared
+        if link is not None:
+            entry["link"] = list(link)
         with self.lock:
             if kind == "checkpoint":
                 # A newer checkpoint of a path takes the place of one not yet on its way.
@@ -407,6 +420,7 @@ class Daemon:
                               if item["kind"] == "checkpoint" and item["path"] == path and item["state"] == "ready"]:
                     del self.outbox[older["id"]]
                     (OUTBOX / older["id"]).unlink(missing_ok=True)
+                    self.seen.discard(tuple(older["link"]))
             self.outbox[ident] = entry
         self.save()
 
@@ -419,13 +433,19 @@ class Daemon:
                 stat = item.stat()
             except FileNotFoundError:
                 continue
-            mark = f"{item.name}:{stat.st_ino}:{stat.st_mtime_ns}"
-            if mark in self.seen:
+            link = (item.name, stat.st_ino, stat.st_mtime_ns)
+            if link in self.seen:
                 continue
-            self.enqueue("checkpoint", step, item, unquote(item.name), declared=mark)
             with self.lock:
-                self.seen.add(mark)
-            self.save()
+                self.seen.add(link)
+            self.enqueue("checkpoint", step, item, unquote(item.name), link=link)
+
+    def drop_checkpoints(self, step):
+        """Forget the step's checkpoints not yet on their way: once it has ended well, nothing needs them."""
+        with self.lock:
+            ids = {ident for ident, entry in self.outbox.items()
+                   if entry["kind"] == "checkpoint" and entry["step"] == step and entry["state"] == "ready"}
+        self.forget(ids)
 
     def forget(self, ids):
         with self.lock:
@@ -434,14 +454,14 @@ class Daemon:
                 if not entry:
                     continue
                 (OUTBOX / ident).unlink(missing_ok=True)
-                if entry.get("declared"):
+                if entry.get("link"):
                     # The job's link goes too, unless the job has linked a newer file there since.
-                    name, inode, changed = entry["declared"].split(":")
+                    name, inode, modified = entry["link"]
                     with contextlib.suppress(FileNotFoundError):
                         stat = (KEEP / name).stat()
-                        if f"{stat.st_ino}" == inode and f"{stat.st_mtime_ns}" == changed:
+                        if (stat.st_ino, stat.st_mtime_ns) == (inode, modified):
                             (KEEP / name).unlink()
-                    self.seen.discard(entry["declared"])
+                    self.seen.discard((name, inode, modified))
         self.save()
 
     def send_loop(self):

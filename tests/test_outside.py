@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from rental.controller import Unreachable
+from rental.provider import RentError, Unreachable
 from rental.r2 import EMPTY, R2Store, authorization, presign
 from rental.vast import VastProvider
 
@@ -112,6 +112,13 @@ class R2StoreTests(unittest.TestCase):
         self.store.write("runs/record.json", b"{}")
         self.assertEqual((self.store.size("runs/record.json"), self.store.etag("runs/record.json")), (2, "e1"))
 
+    def test_knows_when_a_temporary_key_expires_and_that_another_does_not(self):
+        self.assertIsNone(self.store.expires)
+        store = R2Store("bucket", {"AWS_ENDPOINT_URL": "http://127.0.0.1:1", "AWS_ACCESS_KEY_ID": "id",
+                                   "AWS_SECRET_ACCESS_KEY": "secret", "AWS_SESSION_TOKEN": "token",
+                                   "AWS_CREDENTIAL_EXPIRATION": "2026-11-08T03:00:00Z"})
+        self.assertEqual(store.expires, calendar.timegm((2026, 11, 8, 3, 0, 0)))
+
     def test_presigns_part_urls_with_the_upload_and_the_temporary_key(self):
         url = self.store.presign("PUT", "runs/a.pt", 60, {"partNumber": 3, "uploadId": "up1"})
         query = parse_qs(urlsplit(url).query)
@@ -120,19 +127,30 @@ class R2StoreTests(unittest.TestCase):
 
 
 class VastProviderTests(unittest.TestCase):
-    """VastProvider through stand-ins for vast-rental and ssh on PATH, which answer as the real ones do."""
+    """VastProvider through stand-ins for vast-rental and ssh on its PATH, which answer as the real ones do."""
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.root = Path(self.directory.name)
         self.calls = self.root / "calls.jsonl"
         self.script("vast-rental", """
+command, label = sys.argv[1], sys.argv[sys.argv.index("--label") + 1] if "--label" in sys.argv else None
+if command == "rent" and label == "broken":
+    sys.exit(print("the image did not start, and the machine went back", file=sys.stderr) or 2)
+if command == "rent" and label == "scarce":
+    sys.exit(print(json.dumps({"rented": None, "offers": 0, "failed": 0, "failed_dollars": 0.0})) or 1)
+if command == "list" and label == "unlisted":
+    sys.exit(1)
 answers = {
-    "rent": {"rented": 42, "ssh_config": "/tmp/42.config", "failed": 1, "failed_dollars": 0.07},
-    "return": {"returned": 42, "hours": 1.5, "dollars": 0.9},
-    "ssh-config": {"ssh_config": "/tmp/42.config", "ssh_host": "vast-42"},
+    "rent": [{"rented": 42, "ssh_config": "/tmp/42.config", "failed": 1, "failed_dollars": 0.07}],
+    "list": [{"instance": 42, "label": label, "status": "running", "deadline": "2026-11-07T06:00:00+00:00",
+              "hours": 1.0, "dollars": 0.5}],
+    "extend": [{"instance": 42, "deadline": "2026-11-07T12:00:00+00:00"}],
+    "return": [{"returned": 42, "hours": 1.5, "dollars": 0.9}],
+    "ssh-config": [{"ssh_config": "/tmp/42.config", "ssh_host": "vast-42"}],
 }
-print(json.dumps(answers.get(sys.argv[1], {})))
+for answer in answers.get(command, []):
+    print(json.dumps(answer))
 """)
         self.script("ssh", """
 command = sys.argv[-1]
@@ -141,13 +159,10 @@ if command == "unreachable":
 print(json.dumps({"stdin": sys.stdin.read()}))
 sys.exit(3 if command == "fails" else 0)
 """)
-        self.provider = VastProvider(environment={"VAST_API_KEY": "key", "VAST_SSH_KEY_FILE": "/keys/vast",
-                                                  "PATH": os.environ["PATH"]})
-        self.path = os.environ["PATH"]
-        os.environ["PATH"] = f"{self.root}:{self.path}"
+        self.provider = VastProvider(environment={"VAST_SSH_KEY_FILE": "/keys/vast",
+                                                  "PATH": f"{self.root}:{os.environ['PATH']}"})
 
     def tearDown(self):
-        os.environ["PATH"] = self.path
         self.directory.cleanup()
 
     def script(self, name, body):
@@ -162,10 +177,21 @@ sys.exit(3 if command == "fails" else 0)
 
     def test_rents_through_vast_rental_and_reports_the_dollars_its_checks_spent(self):
         needs = {"gpu": "RTX 5090", "image": "image", "disk": 200, "max_price": 0.64, "query": {"a": 1}}
-        self.assertEqual(self.provider.rent("run", needs, 6.2), ("42", 0.07))
+        self.assertEqual(self.provider.rent("run", needs, 6.5), ("42", 0.07))
         self.assertEqual(self.called()[0], ["vast-rental", "rent", "RTX 5090", "--image", "image", "--label", "run",
-                                            "--hours", "7", "--disk", "200", "--max-price", "0.64", "--tries", "6",
+                                            "--hours", "6.5", "--disk", "200", "--max-price", "0.64", "--tries", "6",
                                             "--query", '{"a": 1}'])
+        self.assertEqual(self.provider.rent("scarce", needs, 6), (None, 0.0))
+
+    def test_tells_a_rent_that_failed_from_one_without_an_offer(self):
+        needs = {"gpu": "RTX 5090", "image": "image", "disk": 200, "max_price": 0.64}
+        with self.assertRaisesRegex(RentError, "the image did not start"):
+            self.provider.rent("broken", needs, 6)
+
+    def test_lists_the_machines_with_their_cost_and_deadline_or_none_when_vast_rental_cannot(self):
+        self.assertEqual(self.provider.machines("run"), [
+            {"id": "42", "cost": 0.5, "deadline": calendar.timegm((2026, 11, 7, 6, 0, 0))}])
+        self.assertIsNone(self.provider.machines("unlisted"))
 
     def test_runs_a_command_over_ssh_with_its_input_and_takes_ssh_failure_for_no_answer(self):
         self.assertEqual(self.provider.run("42", "fails", b"payload", 30), (3, '{"stdin": "payload"}\n'))
@@ -175,12 +201,13 @@ sys.exit(3 if command == "fails" else 0)
         self.assertEqual(ssh[1:3], ["-F", "/tmp/42.config"])
         self.assertIn("IdentitiesOnly=yes", ssh)
 
-    def test_returns_a_machine_and_reports_its_dollars(self):
-        self.assertEqual(self.provider.release("42"), 0.9)
+    def test_moves_a_deadline_and_returns_a_machine_with_its_dollars(self):
+        self.assertEqual(self.provider.extend("42", 5.5), calendar.timegm((2026, 11, 7, 12, 0, 0)))
         self.provider.reject("42", "it stopped answering")
-        self.provider.extend("42", 5.5)
-        self.assertEqual(self.called()[1:], [["vast-rental", "reject", "42", "it stopped answering"],
-                                             ["vast-rental", "extend", "42", "6"]])
+        self.assertEqual(self.provider.release("42"), 0.9)
+        self.assertEqual(self.called(), [["vast-rental", "extend", "42", "5.5"],
+                                         ["vast-rental", "reject", "42", "it stopped answering"],
+                                         ["vast-rental", "return", "42"]])
 
 
 if __name__ == "__main__":

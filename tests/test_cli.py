@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from rental.cli import main
+from rental.decide import Leaving, Machine, Memory
 
 
 class CommandLineTests(unittest.TestCase):
@@ -23,6 +24,9 @@ class CommandLineTests(unittest.TestCase):
     def tearDown(self):
         self.directory.cleanup()
 
+    def remember(self, memory):
+        (self.root / "memory.json").write_text(json.dumps(memory.write()))
+
     def command(self, *arguments):
         printed = io.StringIO()
         with contextlib.redirect_stdout(printed):
@@ -33,37 +37,28 @@ class CommandLineTests(unittest.TestCase):
         (self.root / "record.json").write_text(json.dumps({
             "outputs": {"a": {"key": "k", "sha256": "s", "bytes": 1, "step": "first", "at": 1.0}},
             "steps": {"first": ["a"]}}))
-        (self.root / "memory.json").write_text(json.dumps({
-            "machines": {"m2": {"state": "working", "cost": 0.5}}, "leaving": {"m1": {"since": 1.0, "cost": 0.25}},
-            "spent": 1.0, "outcome": None}))
+        self.remember(Memory(machines={"m2": Machine("working", 1.0, cost=0.5)}, leaving={"m1": Leaving(1.0, 0.25)},
+                             spent=1.0))
         (self.root / "events.jsonl").write_text(json.dumps({"at": 1.0, "event": "rented", "machine": "m2"}) + "\n")
 
         code, (summary, event) = self.command("status")
 
         self.assertEqual(code, 0)
         self.assertEqual((summary["finished"], summary["left"], summary["dollars"]), (["first"], ["second"], 1.75))
-        self.assertEqual(summary["machines"], {"m2": {"state": "working", "dollars": 0.5}})
+        self.assertEqual((summary["machines"], summary["leaving"]), ({"m2": {"state": "working", "dollars": 0.5}},
+                                                                     ["m1"]))
         self.assertEqual(event["event"], "rented")
 
-    def test_waits_until_a_machine_leaves_the_run_after_the_wait_began(self):
-        (self.root / "memory.json").write_text(json.dumps({"outcome": None}))
-        (self.root / "events.jsonl").write_text(
-            json.dumps({"at": 1.0, "event": "released", "machine": "m0", "reason": "earlier"}) + "\n")
-
-        def release():
-            with (self.root / "events.jsonl").open("a") as log:
-                log.write(json.dumps({"at": 2.0, "event": "released", "machine": "m1", "reason": "slow"}) + "\n")
-
-        later = threading.Timer(0.2, release)
+    def test_waits_until_the_run_is_over_with_its_machines_gone(self):
+        self.remember(Memory(outcome="complete", detail="done", leaving={"m1": Leaving(1.0, 0.25)}))
+        later = threading.Timer(0.2, self.remember, [Memory(outcome="complete", detail="done", ended=True)])
         later.start()
         code, printed = self.command("wait", "--seconds", "0.05")
         later.join()
-        self.assertEqual((code, printed[0]["reason"]), (2, "slow"))
+        self.assertEqual((code, printed), (0, [{"outcome": "complete", "detail": "done"}]))
 
-    def test_waits_until_the_run_ends_and_says_whether_it_completed(self):
-        (self.root / "memory.json").write_text(json.dumps({"outcome": "complete", "detail": "done"}))
-        self.assertEqual(self.command("wait")[0], 0)
-        (self.root / "memory.json").write_text(json.dumps({"outcome": "failed", "detail": "first failed"}))
+    def test_says_by_its_exit_code_whether_the_run_completed(self):
+        self.remember(Memory(outcome="failed", detail="first failed on 2 machines", ended=True))
         self.assertEqual(self.command("wait")[0], 1)
 
 

@@ -1,9 +1,10 @@
 """Cloudflare R2 through S3's API, signed with AWS Signature Version 4, by the standard library alone.
 
 The controller's key comes from the environment as AWS's tools take it:
-AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN for a temporary
-key, and AWS_ENDPOINT_URL; the bucket comes from the spec. A machine never sees
-the key, only URLs presigned with it.
+AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT_URL, and for a temporary
+key AWS_SESSION_TOKEN and AWS_CREDENTIAL_EXPIRATION, when it expires in ISO 8601;
+the bucket comes from the spec. A machine never sees the key, only URLs
+presigned with it, which stop working when the key expires.
 """
 
 import hashlib
@@ -11,6 +12,7 @@ import hmac
 import os
 import time
 import xml.etree.ElementTree as ElementTree
+from datetime import datetime
 from urllib.error import HTTPError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
@@ -82,6 +84,8 @@ class R2Store:
         self.region = environment.get("AWS_REGION", "auto")
         self.credentials = {"id": environment["AWS_ACCESS_KEY_ID"], "secret": environment["AWS_SECRET_ACCESS_KEY"],
                             "token": environment.get("AWS_SESSION_TOKEN")}
+        expiration = environment.get("AWS_CREDENTIAL_EXPIRATION")
+        self.expires = datetime.fromisoformat(expiration).timestamp() if expiration else None
 
     def path(self, key):
         return f"/{encode(self.bucket)}/{encode(key, safe='/')}"

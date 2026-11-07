@@ -72,13 +72,13 @@ class RehearsalTests(unittest.TestCase):
         return Controller(self.run_directory, self.provider, self.store)
 
     def carry(self, controller, until=None, seconds=60):
-        """Tick until the run ends, or until(controller) holds; fail if neither comes in time."""
+        """Tick until the run is over, or until(controller) holds, and give its outcome; fail if neither comes in time."""
         controller.prepare()
         ended = time.monotonic() + seconds
         while time.monotonic() < ended:
-            outcome = controller.tick()
-            if outcome or (until and until(controller)):
-                return outcome
+            controller.tick()
+            if controller.memory.ended or (until and until(controller)):
+                return controller.memory.outcome
             time.sleep(controller.spec.policy.tick)
         self.fail("the run did not end in time")
 
@@ -168,6 +168,18 @@ class RehearsalTests(unittest.TestCase):
         self.assertEqual(outcome, "complete")
         self.assert_run_complete()
         self.assertEqual(self.provider.rented, ["m1"])
+
+    def test_stops_before_its_store_key_runs_out_and_carries_on_once_started_again_with_a_new_one(self):
+        self.store.expires = time.time() + POLICY["url"] + 1.0
+
+        self.assertFalse(self.controller().run())
+
+        self.store.expires = None
+        outcome = self.carry(self.controller())
+        self.assertEqual(outcome, "complete")
+        self.assert_run_complete()
+        self.assertEqual(self.provider.rented, ["m1"])
+        self.assertIn("key_running_out", [event["event"] for event in self.events()])
 
     def test_waits_while_no_offer_fits_and_rents_once_one_does(self):
         self.offers.clear()
