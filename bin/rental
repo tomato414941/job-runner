@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""rental, from this checkout: see rental/cli.py."""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from rental.cli import main  # noqa: E402
+
+sys.exit(main())
