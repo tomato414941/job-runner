@@ -1,2 +1,5 @@
 __pycache__/
 **/.claude/settings.local.json
+# The Vast.ai part's key and the ledger of its machines.
+vast/.env
+vast/data/

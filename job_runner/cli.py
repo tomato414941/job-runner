@@ -5,6 +5,8 @@
   job-runner status DIRECTORY   what the run has finished, what its machines do, and what it has cost
   job-runner wait DIRECTORY     wait until the run is over; exit 0 when it is complete
   job-runner stop DIRECTORY     ask the run to end now: its machines keep what they hold in the store and go back
+  job-runner vast COMMAND ...   Vast.ai's machines, as vast/machines.py says: their offers, renting and
+                                checking one, the ledger, and the watcher that sends them back
 
 run keeps its memory, a copy of the record and a log of what it did,
 events.jsonl, in the directory, and exits 0 once the run is over. It takes the
@@ -22,6 +24,7 @@ run with the same spec carries on from what the store keeps.
 
 import argparse
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -103,6 +106,11 @@ def wait(args):
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["vast"]:
+        from .vast import MACHINES
+
+        return subprocess.run([sys.executable, str(MACHINES), *argv[1:]]).returncode
     parser = argparse.ArgumentParser(prog="job-runner", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(required=True)

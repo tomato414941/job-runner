@@ -1,4 +1,4 @@
-"""The adapters to the world outside: R2's signatures and requests, and Vast.ai through vast-rental and ssh."""
+"""The adapters to the world outside: R2's signatures and requests, and Vast.ai through vast/machines.py and ssh."""
 
 import calendar
 import json
@@ -127,13 +127,13 @@ class R2StoreTests(unittest.TestCase):
 
 
 class VastProviderTests(unittest.TestCase):
-    """VastProvider through stand-ins for vast-rental and ssh on its PATH, which answer as the real ones do."""
+    """VastProvider through stand-ins for machines.py and for ssh on its PATH, which answer as the real ones do."""
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.root = Path(self.directory.name)
         self.calls = self.root / "calls.jsonl"
-        self.script("vast-rental", """
+        self.script("machines", """
 command, label = sys.argv[1], sys.argv[sys.argv.index("--label") + 1] if "--label" in sys.argv else None
 if command == "rent" and label == "broken":
     sys.exit(print("the image did not start, and the machine went back", file=sys.stderr) or 2)
@@ -159,7 +159,7 @@ if command == "unreachable":
 print(json.dumps({"stdin": sys.stdin.read()}))
 sys.exit(3 if command == "fails" else 0)
 """)
-        self.provider = VastProvider(environment={"VAST_SSH_KEY_FILE": "/keys/vast",
+        self.provider = VastProvider(command=(str(self.root / "machines"),), environment={"VAST_SSH_KEY_FILE": "/keys/vast",
                                                   "PATH": f"{self.root}:{os.environ['PATH']}"})
 
     def tearDown(self):
@@ -175,10 +175,10 @@ sys.exit(3 if command == "fails" else 0)
     def called(self):
         return [json.loads(line) for line in self.calls.read_text().splitlines()]
 
-    def test_rents_through_vast_rental_and_reports_the_dollars_its_checks_spent(self):
+    def test_rents_through_the_machines_script_and_reports_the_dollars_its_checks_spent(self):
         needs = {"gpu": "RTX 5090", "image": "image", "disk": 200, "max_price": 0.64, "query": {"a": 1}}
         self.assertEqual(self.provider.rent("run", needs, 6.5), ("42", 0.07))
-        self.assertEqual(self.called()[0], ["vast-rental", "rent", "RTX 5090", "--image", "image", "--label", "run",
+        self.assertEqual(self.called()[0], ["machines", "rent", "RTX 5090", "--image", "image", "--label", "run",
                                             "--hours", "6.5", "--disk", "200", "--max-price", "0.64", "--tries", "6",
                                             "--query", '{"a": 1}'])
         self.assertEqual(self.provider.rent("scarce", needs, 6), (None, 0.0))
@@ -191,7 +191,7 @@ sys.exit(3 if command == "fails" else 0)
         with self.assertRaisesRegex(RentError, "the image did not start"):
             self.provider.rent("broken", needs, 6)
 
-    def test_lists_the_machines_with_their_cost_and_deadline_or_none_when_vast_rental_cannot(self):
+    def test_lists_the_machines_with_their_cost_and_deadline_or_none_when_the_machines_script_cannot(self):
         self.assertEqual(self.provider.machines("run"), [
             {"id": "42", "cost": 0.5, "deadline": calendar.timegm((2026, 11, 7, 6, 0, 0))}])
         self.assertIsNone(self.provider.machines("unlisted"))
@@ -208,9 +208,9 @@ sys.exit(3 if command == "fails" else 0)
         self.assertEqual(self.provider.extend("42", 5.5), calendar.timegm((2026, 11, 7, 12, 0, 0)))
         self.provider.reject("42", "it stopped answering")
         self.assertEqual(self.provider.release("42"), 0.9)
-        self.assertEqual(self.called(), [["vast-rental", "extend", "42", "5.5"],
-                                         ["vast-rental", "reject", "42", "it stopped answering"],
-                                         ["vast-rental", "return", "42"]])
+        self.assertEqual(self.called(), [["machines", "extend", "42", "5.5"],
+                                         ["machines", "reject", "42", "it stopped answering"],
+                                         ["machines", "return", "42"]])
 
 
 if __name__ == "__main__":
