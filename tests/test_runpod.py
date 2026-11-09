@@ -109,6 +109,14 @@ class RunPodProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(RentError, "imageName is required"):
             self.rent({**self.needs, "gpus": ["wrong"]})
 
+    def test_asks_for_cpus_a_gpu_and_cuda_versions_only_when_given(self):
+        self.rent({**self.needs, "min_vcpus_per_gpu": 8, "allowed_cuda_versions": ["13.0"]})
+        self.rent()
+        given, plain = [body for method, _, body in self.cloud["requests"] if method == "POST"]
+        self.assertEqual((given["minVCPUPerGPU"], given["allowedCudaVersions"]), (8, ["13.0"]))
+        self.assertNotIn("minVCPUPerGPU", plain)
+        self.assertNotIn("allowedCudaVersions", plain)
+
     def test_asks_for_cpus_for_a_cpu_pod(self):
         self.rent({"compute": "CPU", "vcpus": 16, "image": "runpod/base", "disk": 40})
         body = self.cloud["requests"][0][2]

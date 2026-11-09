@@ -2,9 +2,10 @@
 
 The spec's provider says what to rent:
   {"kind": "runpod", "compute": "GPU", "gpus": ["NVIDIA GeForce RTX 5090"], "gpu_count": 1,
-   "image": IMAGE, "disk": GB, "cloud": "COMMUNITY"}
+   "image": IMAGE, "disk": GB, "cloud": "COMMUNITY", "min_vcpus_per_gpu": N, "allowed_cuda_versions": ["13.0"]}
 or, for a CPU pod, {"kind": "runpod", "compute": "CPU", "vcpus": N, "image": IMAGE, "disk": GB, "cloud": ...}.
-RunPod takes the first of the GPU types with room. The image must run sshd and take the public
+RunPod takes the first of the GPU types with room, on a machine with at least min_vcpus_per_gpu
+CPUs a GPU and a driver for one of allowed_cuda_versions when they are given. The image must run sshd and take the public
 key from PUBLIC_KEY, as RunPod's own images do. RUNPOD_API_KEY is the account's key, and
 RUNPOD_SSH_KEY_FILE the private key whose public half the pod is given. RunPod keeps no deadline,
 and renaming a pod may restart it, so each pod's run and deadline are kept here, in
@@ -84,6 +85,10 @@ class RunPodProvider:
                 "cloudType": needs.get("cloud", "COMMUNITY"), "supportPublicIp": True}
         if body["computeType"] == "GPU":
             body.update(gpuTypeIds=needs["gpus"], gpuCount=needs.get("gpu_count", 1))
+            if "min_vcpus_per_gpu" in needs:
+                body["minVCPUPerGPU"] = needs["min_vcpus_per_gpu"]
+            if "allowed_cuda_versions" in needs:
+                body["allowedCudaVersions"] = needs["allowed_cuda_versions"]
         else:
             body["vcpuCount"] = needs["vcpus"]
         try:
