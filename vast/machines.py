@@ -844,7 +844,9 @@ def parser():
         command.add_argument("--countries", type=lambda text: [code for code in text.split(",") if code],
                              help="country codes, comma-separated")
         command.add_argument("--disk", type=float, default=60, help="GB")
-        command.add_argument("--query", type=json.loads, help="more of Vast.ai's search filters, as JSON")
+        command.add_argument("--query", type=json.loads,
+                             help='more of Vast.ai\'s search filters, as JSON, such as {"cuda_max_good": {"gte": 12.8}} '
+                                  "for machines whose driver runs CUDA 12.8")
         command.add_argument("--unverified", action="store_true",
                              help="also machines that Vast.ai has not verified yet")
         command.add_argument("--avoid", type=lambda text: [int(item) for item in text.split(",") if item],
