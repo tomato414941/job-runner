@@ -12,9 +12,9 @@ import time
 import unittest
 from pathlib import Path
 
-from rental.cli import main
-from rental.controller import Controller
-from rental.local import SIGNATURE, LocalProvider, LocalStore
+from job_runner.cli import main
+from job_runner.controller import Controller
+from job_runner.local import SIGNATURE, LocalProvider, LocalStore
 
 HERE = Path(__file__).resolve().parent
 PREFIX = "runs/rehearsal"
@@ -93,7 +93,7 @@ class RehearsalTests(unittest.TestCase):
         self.spec["steps"][0] = train("first", 300, "--data", "data/corpus.bin", inputs=["data/corpus.bin"])
 
     def job_log(self, machine, step):
-        return self.root / "machines" / machine / ".rental/logs" / f"{step}.log"
+        return self.root / "machines" / machine / ".job-runner/logs" / f"{step}.log"
 
     def started(self, machine, step):
         """Whether the step's job on the machine is under way, past setting up what it does on SIGTERM."""

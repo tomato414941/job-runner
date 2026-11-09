@@ -32,9 +32,9 @@ it, so that nothing of a failed step stays to fail the check or the next step.
 
 What a step's command does for the run:
 - run again, it finishes what is left and redoes nothing done;
-- it may write {"done": N, "total": M} to the file RENTAL_PROGRESS names;
+- it may write {"done": N, "total": M} to the file JOB_RUNNER_PROGRESS names;
 - a file it wants kept, such as a checkpoint once saved, it links into the
-  directory RENTAL_KEEP names, under its path relative to the code with each
+  directory JOB_RUNNER_KEEP names, under its path relative to the code with each
   "/" written "%2F", replacing that name atomically; the newest link of a path wins;
 - on SIGTERM it saves what it can, keeps it as above, and exits.
 When a step's command exits 0, its outputs and its log go to the outbox, and its
@@ -66,7 +66,7 @@ from urllib.error import HTTPError
 from urllib.parse import unquote
 from urllib.request import Request, urlopen
 
-HOME = Path(os.environ.get("RENTAL_HOME") or Path.home() / ".rental")
+HOME = Path(os.environ.get("JOB_RUNNER_HOME") or Path.home() / ".job-runner")
 CODE, KEEP, OUTBOX, LOGS = HOME / "code", HOME / "keep", HOME / "outbox", HOME / "logs"
 SOCKET, LOCK, STATE = HOME / "agent.sock", HOME / "agent.lock", HOME / "state.json"
 PROGRESS, INSTALLED = HOME / "progress.json", HOME / "installed"
@@ -299,7 +299,7 @@ class Daemon:
         """
         variables = {**os.environ, **(environment or {})}
         if step:
-            variables.update(RENTAL_PROGRESS=str(PROGRESS), RENTAL_KEEP=str(KEEP))
+            variables.update(JOB_RUNNER_PROGRESS=str(PROGRESS), JOB_RUNNER_KEEP=str(KEEP))
         with self.lock:
             if self.stopping:
                 return None
@@ -418,7 +418,7 @@ class Daemon:
             if self.stopping or code != 0:
                 if log.exists():
                     # A step told to stop before it began has no log.
-                    self.enqueue("log", step["name"], log, f".rental/logs/{step['name']}.log")
+                    self.enqueue("log", step["name"], log, f".job-runner/logs/{step['name']}.log")
                 if not self.stopping:
                     # Whose fault it is: a machine that passed its check and fails it now is what broke.
                     with self.lock:
@@ -438,7 +438,7 @@ class Daemon:
             listed = [str(item.relative_to(CODE)) for item in outputs]
             for item in outputs:
                 self.enqueue("output", step["name"], item, str(item.relative_to(CODE)), listed)
-            self.enqueue("log", step["name"], log, f".rental/logs/{step['name']}.log", listed)
+            self.enqueue("log", step["name"], log, f".job-runner/logs/{step['name']}.log", listed)
             self.drop_checkpoints(step["name"])
         with self.lock:
             self.phase, self.step = "finished", None

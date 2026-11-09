@@ -6,8 +6,8 @@ import threading
 import unittest
 from pathlib import Path
 
-from rental.cli import main
-from rental.decide import Leaving, Machine, Memory
+from job_runner.cli import main
+from job_runner.decide import Leaving, Machine, Memory
 
 
 class CommandLineTests(unittest.TestCase):

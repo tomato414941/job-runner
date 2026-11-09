@@ -1,10 +1,10 @@
 """Carry a run on rented machines to its end, and see how it goes.
 
-  rental check DIRECTORY    what would keep the run whose spec.json is in DIRECTORY from starting now
-  rental run DIRECTORY      carry the run to its end
-  rental status DIRECTORY   what the run has finished, what its machines do, and what it has cost
-  rental wait DIRECTORY     wait until the run is over; exit 0 when it is complete
-  rental stop DIRECTORY     ask the run to end now: its machines keep what they hold in the store and go back
+  job-runner check DIRECTORY    what would keep the run whose spec.json is in DIRECTORY from starting now
+  job-runner run DIRECTORY      carry the run to its end
+  job-runner status DIRECTORY   what the run has finished, what its machines do, and what it has cost
+  job-runner wait DIRECTORY     wait until the run is over; exit 0 when it is complete
+  job-runner stop DIRECTORY     ask the run to end now: its machines keep what they hold in the store and go back
 
 run keeps its memory, a copy of the record and a log of what it did,
 events.jsonl, in the directory, and exits 0 once the run is over. It takes the
@@ -13,7 +13,7 @@ with AWS_SESSION_TOKEN and AWS_CREDENTIAL_EXPIRATION for a temporary key, and
 reaches the provider's machines with the SSH key in the file VAST_SSH_KEY_FILE
 names. It exits 75 when the store's key would expire before a URL it gives, so
 it runs best as a service that starts it again with new keys:
-  systemd-run --user --unit rental-NAME -p Restart=on-failure -p RestartSec=60 -- KEYS rental run DIRECTORY
+  systemd-run --user --unit job-runner-NAME -p Restart=on-failure -p RestartSec=60 -- KEYS job-runner run DIRECTORY
 where KEYS is the command that gives it its keys. check needs the same keys and
 changes nothing; status and wait read the directory alone. stop writes the
 request, which the controller carrying the run takes up at its next look; a new
@@ -103,7 +103,7 @@ def wait(args):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="rental", description=__doc__,
+    parser = argparse.ArgumentParser(prog="job-runner", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(required=True)
     for name, function in (("check", check), ("run", run), ("status", status), ("wait", wait), ("stop", stop)):

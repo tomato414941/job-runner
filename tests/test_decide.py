@@ -1,11 +1,11 @@
 import unittest
 
-from rental.decide import (
+from job_runner.decide import (
     End, Extend, Install, Keep, KeepFailed, Leaving, Machine, Memory, NoOffer, Reject, Release, Released, Rent,
     RentFailed, Seen, Send, Start, Stop, StopAsked, Upload, decide,
 )
-from rental.record import Record
-from rental.spec import Spec
+from job_runner.record import Record
+from job_runner.spec import Spec
 
 NOW = 100_000.0
 SPEC = Spec.read({

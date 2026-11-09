@@ -25,8 +25,8 @@ from .provider import RentError, Unreachable
 from .record import Record
 from .spec import Spec
 
-AGENT = '"$HOME/.rental/bootstrap.sh" {command}'
-SHIP = 'mkdir -p "$HOME/.rental" && tar -x -C "$HOME/.rental"'
+AGENT = '"$HOME/.job-runner/bootstrap.sh" {command}'
+SHIP = 'mkdir -p "$HOME/.job-runner" && tar -x -C "$HOME/.job-runner"'
 MACHINE_FILES = ("agent.py", "bootstrap.sh")
 # The file in a run's directory that asks the run to stop, with why: {"reason": ...}.
 STOP = "stop"
@@ -272,7 +272,7 @@ class Controller:
         if kept:
             written = json.dumps(self.record.write()).encode()
             self.store.write(self.key("record.json"), written)
-            # A copy beside the memory, for `rental status`; the store's is the truth.
+            # A copy beside the memory, for `job-runner status`; the store's is the truth.
             (self.directory / "record.json").write_bytes(written)
             for entry in kept:
                 self.event("kept", machine=action.machine, kind=entry["kind"], step=entry["step"],

@@ -5,10 +5,10 @@ import time
 import unittest
 from pathlib import Path
 
-from rental.controller import Controller, etag
-from rental.decide import Install, Keep, KeepFailed, Reject, RentFailed, Send, Start
-from rental.local import LocalStore
-from rental.provider import RentError
+from job_runner.controller import Controller, etag
+from job_runner.decide import Install, Keep, KeepFailed, Reject, RentFailed, Send, Start
+from job_runner.local import LocalStore
+from job_runner.provider import RentError
 
 PREFIX = "runs/run"
 

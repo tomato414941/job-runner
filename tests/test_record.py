@@ -1,7 +1,7 @@
 import unittest
 
-from rental.record import Record
-from rental.spec import Spec
+from job_runner.record import Record
+from job_runner.spec import Spec
 
 SPEC = Spec.read({
     "name": "run", "provider": {}, "store": {"prefix": "runs/run"}, "code": {"path": "code.tar.gz"},
@@ -31,9 +31,9 @@ class RecordTests(unittest.TestCase):
         self.assertEqual(record.finished(SPEC), ["first"])
 
     def test_finishes_a_step_without_outputs_once_its_log_says_it_ended_well(self):
-        failed = Record().kept(entry("log", "check", ".rental/logs/check.log"), "k", 1.0)
+        failed = Record().kept(entry("log", "check", ".job-runner/logs/check.log"), "k", 1.0)
         self.assertEqual(failed.finished(SPEC), [])
-        ended = Record().kept(entry("log", "check", ".rental/logs/check.log", []), "k", 1.0)
+        ended = Record().kept(entry("log", "check", ".job-runner/logs/check.log", []), "k", 1.0)
         self.assertEqual(ended.finished(SPEC), ["check"])
 
     def test_fetches_what_the_steps_left_read_and_the_next_step_checkpoints(self):
@@ -44,7 +44,7 @@ class RecordTests(unittest.TestCase):
         )
         listed = ["out/first/a.pt"]
         record = record.kept(entry("output", "first", "out/first/a.pt", listed), "runs/run/outputs/out/first/a.pt", 2)
-        record = record.kept(entry("log", "check", ".rental/logs/check.log", []), "k", 3.0)
+        record = record.kept(entry("log", "check", ".job-runner/logs/check.log", []), "k", 3.0)
         self.assertEqual([(item["path"], item["key"]) for item in record.fetch(SPEC)],
                          [("data/b.bin", "data/b.bin"), ("out/first/a.pt", "runs/run/outputs/out/first/a.pt")])
 
@@ -52,7 +52,7 @@ class RecordTests(unittest.TestCase):
         self.assertEqual(Record.key(entry("output", "first", "out/first/a.pt")), "outputs/out/first/a.pt")
         self.assertEqual(Record.key(entry("checkpoint", "first", "out/first/a.pt")),
                          "checkpoints/first/out/first/a.pt")
-        self.assertEqual(Record.key(entry("log", "first", ".rental/logs/first.log")), "logs/first.log")
+        self.assertEqual(Record.key(entry("log", "first", ".job-runner/logs/first.log")), "logs/first.log")
 
     def test_reads_back_what_it_wrote(self):
         record = Record().kept(entry("output", "first", "out/first/a.pt", ["out/first/a.pt"]), "k", 1.0)

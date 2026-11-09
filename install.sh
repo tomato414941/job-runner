@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Put bin/rental on PATH as rental.
+# Put bin/job-runner on PATH as job-runner.
 set -euo pipefail
 
-source="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bin/rental"
-link="$HOME/.local/bin/rental"
+source="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bin/job-runner"
+link="$HOME/.local/bin/job-runner"
 mkdir -p "$(dirname "$link")"
 if [[ -L "$link" && "$(readlink "$link")" == "$source" ]]; then
   :

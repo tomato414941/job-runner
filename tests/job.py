@@ -1,6 +1,6 @@
 """A job that keeps the run's side of the contract, standing in for training in the rehearsal.
 
-train steps at the speed its machine sets in RENTAL_SPEED, reports its progress,
+train steps at the speed its machine sets in JOB_RUNNER_SPEED, reports its progress,
 saves its checkpoint every few steps and keeps it, takes up from its own
 checkpoint when run again, saves and keeps on SIGTERM, and can fail at a step.
 evaluate writes the step of the checkpoint it reads, unless it already has.
@@ -22,7 +22,7 @@ SECONDS_PER_STEP = 0.02
 
 
 def keep(path):
-    directory = os.environ.get("RENTAL_KEEP")
+    directory = os.environ.get("JOB_RUNNER_KEEP")
     if directory:
         temporary = Path(directory) / f".{quote(str(path), safe='')}.{os.getpid()}"
         os.link(path, temporary)
@@ -34,7 +34,7 @@ def gpu_lost():
 
 
 def progress(done, total):
-    path = os.environ.get("RENTAL_PROGRESS")
+    path = os.environ.get("JOB_RUNNER_PROGRESS")
     if path:
         temporary = Path(f"{path}.{os.getpid()}")
         temporary.write_text(json.dumps({"done": done, "total": total}))
@@ -61,7 +61,7 @@ def train(args):
             raise SystemExit(f"{given} is missing")
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
     start = saved_step(checkpoint) if checkpoint.exists() else 0
-    speed = float(os.environ.get("RENTAL_SPEED", "1"))
+    speed = float(os.environ.get("JOB_RUNNER_SPEED", "1"))
     stopping = []
     signal.signal(signal.SIGTERM, lambda *_: stopping.append(True))
     print(json.dumps({"event": "start", "resumed_from": start}), flush=True)

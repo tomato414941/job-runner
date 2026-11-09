@@ -152,7 +152,7 @@ class LocalStore:
 
 class LocalProvider:
     """Machines that are directories here. An offer is {"price", "speed", "count", "broken"}: dollars an hour, a
-    speed the machine's processes see as RENTAL_SPEED, how many machines it has, and whether their GPU is lost, which
+    speed the machine's processes see as JOB_RUNNER_SPEED, how many machines it has, and whether their GPU is lost, which
     the file `broken` in a machine's HOME tells its processes."""
 
     def __init__(self, directory, offers, uv):
@@ -170,9 +170,9 @@ class LocalProvider:
             offer["count"] = offer.get("count", 1) - 1
             ident = f"m{len(self.rented) + 1}"
             home = self.directory / ident
-            (home / ".rental/uv").mkdir(parents=True)
+            (home / ".job-runner/uv").mkdir(parents=True)
             # The machine's uv is this one's, so that a rehearsal downloads nothing.
-            (home / ".rental/uv/uv").symlink_to(self.uv)
+            (home / ".job-runner/uv/uv").symlink_to(self.uv)
             if offer.get("broken"):
                 (home / "broken").touch()
             self.machines_[ident] = {"home": home, "label": label, "price": offer["price"], "speed": offer["speed"],
@@ -197,7 +197,7 @@ class LocalProvider:
         machine = self.machines_[ident]
         if not machine["answers"] or machine.get("returned"):
             raise Unreachable(ident)
-        environment = {"PATH": os.environ["PATH"], "HOME": str(machine["home"]), "RENTAL_SPEED": str(machine["speed"])}
+        environment = {"PATH": os.environ["PATH"], "HOME": str(machine["home"]), "JOB_RUNNER_SPEED": str(machine["speed"])}
         ran = subprocess.run(["sh", "-c", command], input=data, capture_output=True, timeout=timeout,
                              cwd=machine["home"], env=environment)
         return ran.returncode, ran.stdout.decode(errors="replace")

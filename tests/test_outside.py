@@ -12,9 +12,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from rental.provider import RentError, Unreachable
-from rental.r2 import EMPTY, R2Store, authorization, presign
-from rental.vast import VastProvider
+from job_runner.provider import RentError, Unreachable
+from job_runner.r2 import EMPTY, R2Store, authorization, presign
+from job_runner.vast import VastProvider
 
 # AWS's own examples of Signature Version 4 for S3, with their published signatures.
 EXAMPLE = {"id": "AKIAIOSFODNN7EXAMPLE", "secret": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}

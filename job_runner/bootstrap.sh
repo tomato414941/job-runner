@@ -2,7 +2,7 @@
 # A rented machine's entry for every command the controller runs: get uv, with
 # which the agent gets its Python, once; then hand the command to the agent.
 set -eu
-home="${RENTAL_HOME:-$HOME/.rental}"
+home="${JOB_RUNNER_HOME:-$HOME/.job-runner}"
 uv="$home/uv/uv"
 if [ ! -x "$uv" ]; then
   if ! command -v curl >/dev/null 2>&1; then
