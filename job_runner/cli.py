@@ -7,6 +7,7 @@
   job-runner stop DIRECTORY     ask the run to end now: its machines keep what they hold in the store and go back
   job-runner vast COMMAND ...   Vast.ai's machines, as vast/machines.py says: their offers, renting and
                                 checking one, the ledger, and the watcher that sends them back
+  job-runner hetzner sweep      delete the Hetzner Cloud servers of runs whose deadline has passed
 
 run keeps its memory, a copy of the record and a log of what it did,
 events.jsonl, in the directory, and exits 0 once the run is over. It takes the
@@ -40,9 +41,14 @@ AGAIN = 75
 
 def outside(spec):
     """The provider and the store the spec names."""
-    if spec.provider.get("kind") != "vast" or spec.store.get("kind") != "r2":
-        raise SystemExit("run knows the provider vast and the store r2")
+    if spec.provider.get("kind") not in ("vast", "hetzner") or spec.store.get("kind") != "r2":
+        raise SystemExit("run knows the providers vast and hetzner and the store r2")
     from .r2 import R2Store
+
+    if spec.provider["kind"] == "hetzner":
+        from .hetzner import HetznerProvider
+
+        return HetznerProvider(), R2Store(spec.store["bucket"])
     from .vast import VastProvider
 
     return VastProvider(), R2Store(spec.store["bucket"])
@@ -107,6 +113,10 @@ def wait(args):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["hetzner"]:
+        from .hetzner import main as hetzner
+
+        return hetzner(argv[1:])
     if argv[:1] == ["vast"]:
         from .vast import MACHINES
 
