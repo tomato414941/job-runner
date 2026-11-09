@@ -4,9 +4,10 @@ The spec's provider says what to rent:
   {"kind": "hetzner", "server_type": "cpx51", "location": "hel1", "image": "ubuntu-24.04", "ssh_key": NAME}
 ssh_key names a key already in the Hetzner Cloud project, whose private half is the file
 HETZNER_SSH_KEY_FILE names; HCLOUD_TOKEN is the project's API token. Each server carries the
-run's label and its deadline as labels, so that `job-runner hetzner sweep` deletes the servers
-past their deadline whatever has become of their run. A server is reached as root at its
-address, which never shows here.
+run's label and its deadline as labels, so that this workstation's watcher, `job-runner hetzner
+watch`, deletes the servers past their deadline whatever has become of their run; rent rents
+nothing while the watcher does not run. A server is reached as root at its address, which
+never shows here.
 """
 
 import json
@@ -20,9 +21,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
-from pathlib import Path
 
-from .provider import RentError, Unreachable
+from .provider import RentError, Unreachable, state
+from .watcher import needed, watch, watching
 
 API = "https://api.hetzner.cloud/v1"
 LABEL, DEADLINE = "job-runner", "job-runner-deadline"
@@ -60,6 +61,8 @@ class HetznerProvider:
             return False
 
     def rent(self, label, needs, hours, avoid=()):
+        if not watching("hetzner"):
+            raise RentError(needed("hetzner"))
         deadline = int(time.time() + hours * 3600)
         body = {"name": f"{label}-{deadline}"[-63:].lstrip("-"), "server_type": needs["server_type"],
                 "image": needs["image"], "location": needs["location"], "ssh_keys": [needs["ssh_key"]],
@@ -110,7 +113,7 @@ class HetznerProvider:
             except (urllib.error.URLError, OSError, KeyError, ValueError):
                 raise Unreachable(ident) from None
         # Each server keeps its own host key, so that one that takes over an address is not taken for another.
-        known = Path.home() / ".local/state/job-runner/hetzner"
+        known = state("hetzner") / "known_hosts"
         known.mkdir(parents=True, exist_ok=True, mode=0o700)
         ssh = ["ssh", "-i", self.environment["HETZNER_SSH_KEY_FILE"], "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
                "-o", "ConnectTimeout=30", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
@@ -157,8 +160,7 @@ class HetznerProvider:
 
 
 def main(argv):
-    if argv != ["sweep"]:
-        print("usage: job-runner hetzner sweep", file=sys.stderr)
+    if argv != ["watch"]:
+        print("usage: job-runner hetzner watch", file=sys.stderr)
         return 2
-    HetznerProvider().sweep()
-    return 0
+    watch("hetzner", HetznerProvider().sweep)

@@ -21,8 +21,8 @@ or whose return the work asked for but Vast.ai did not complete, whatever has be
 while the watcher does not run. return records that the machine is to go back before it destroys it, so that a return
 that fails is the watcher's to finish.
 
-rent, list, ssh-config, return and watch need the Vast.ai API key in VAST_API_KEY, which this script takes from .env beside
-it, one NAME=VALUE a line, unless the environment already gives it. rent and ssh-config need the caller's SSH key as
+rent, list, ssh-config, return and watch need the Vast.ai API key in VAST_API_KEY, which this script takes from
+job-runner's .env, one NAME=VALUE a line, unless the environment already gives it. rent and ssh-config need the caller's SSH key as
 the private key file that VAST_SSH_KEY_FILE names. rent gives its public half to the machine it rents, and only to that
 machine, checks the machine over ssh with that key, the way the work will reach it, and writes how to reach the
 machine it keeps to data/ssh/INSTANCE.config, printing that path with the machine's deadline: the work reaches the
@@ -69,8 +69,8 @@ import machine_check
 import shared_ledger
 
 HERE = Path(__file__).resolve().parent
-# Settings such as VAST_API_KEY, one NAME=VALUE a line; what the environment already has wins.
-ENV_FILE = HERE / ".env"
+# job-runner's settings, such as VAST_API_KEY, one NAME=VALUE a line; what the environment already has wins.
+ENV_FILE = HERE.parent / ".env"
 # Vast.ai's API, whose list of instances has moved to its second version.
 API = os.environ.get("VAST_URL", "https://console.vast.ai").rstrip("/") + "/api"
 PROVIDER = "vast"

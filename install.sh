@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Put bin/job-runner on PATH as job-runner, and run this workstation's watcher of Vast.ai machines as a systemd user
-# service that starts with the workstation and comes back if it stops. Run it again after vast/machines.py changes,
-# to restart the watcher.
+# Put bin/job-runner on PATH as job-runner, and run this workstation's watchers, which send each provider's machines
+# back at their deadlines, as systemd user services that start with the workstation and come back if they stop: one
+# for each provider whose key .env, beside this script, gives. Run it again after .env or the code changes, to
+# restart them.
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,14 +19,14 @@ else
   echo "linked $link"
 fi
 
-unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/job-runner-watch.service"
+unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/job-runner-watch@.service"
 mkdir -p "$(dirname "$unit")"
 cat > "$unit.tmp" <<EOF
 [Unit]
-Description=Send back this workstation's Vast.ai machines at their deadlines
+Description=Send back the machines this workstation rented from %i at their deadlines
 
 [Service]
-ExecStart=$(command -v python3) $repo/vast/machines.py watch
+ExecStart=$(command -v python3) $source %i watch
 Restart=always
 RestartSec=10
 
@@ -34,9 +35,19 @@ WantedBy=default.target
 EOF
 mv "$unit.tmp" "$unit"
 systemctl --user daemon-reload
-systemctl --user enable job-runner-watch.service
-systemctl --user restart job-runner-watch.service
-echo "the watcher runs as job-runner-watch.service"
+for watcher in vast:VAST_API_KEY hetzner:HCLOUD_TOKEN runpod:RUNPOD_API_KEY; do
+  provider="${watcher%%:*}"
+  key="${watcher#*:}"
+  service="job-runner-watch@$provider.service"
+  if grep -q "^$key=." "$repo/.env" 2>/dev/null; then
+    systemctl --user enable --quiet "$service"
+    systemctl --user restart "$service"
+    echo "the watcher of $provider runs as $service"
+  else
+    systemctl --user disable --quiet --now "$service" 2>/dev/null || true
+    echo "no watcher of $provider: .env gives no $key"
+  fi
+done
 if [[ "$(loginctl show-user "$USER" --property=Linger --value 2>/dev/null)" != "yes" ]]; then
-  echo "the watcher stops with your last session until you run: loginctl enable-linger $USER" >&2
+  echo "the watchers stop with your last session until you run: loginctl enable-linger $USER" >&2
 fi

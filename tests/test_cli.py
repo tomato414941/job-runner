@@ -1,13 +1,33 @@
 import contextlib
 import io
 import json
+import os
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from job_runner.cli import main
+from job_runner.cli import load_env, main
 from job_runner.decide import Leaving, Machine, Memory
+
+
+class SettingsTests(unittest.TestCase):
+    def test_takes_settings_from_the_file_leaving_alone_those_the_environment_gives(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(os.environ, {"GIVEN": "from-the-environment", "EMPTY": ""}):
+            os.environ.pop("MISSING", None)
+            path = Path(directory) / ".env"
+            path.write_text("# keys\nGIVEN=from-the-file\nEMPTY=from-the-file\nMISSING = 'from-the-file'\n")
+            load_env(path)
+            self.assertEqual((os.environ["GIVEN"], os.environ["EMPTY"], os.environ["MISSING"]),
+                             ("from-the-environment", "from-the-file", "from-the-file"))
+
+    def test_takes_nothing_where_there_is_no_file(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ):
+            before = dict(os.environ)
+            load_env(Path(directory) / ".env")
+            self.assertEqual(dict(os.environ), before)
 
 
 class CommandLineTests(unittest.TestCase):

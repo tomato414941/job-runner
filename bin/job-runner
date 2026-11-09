@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""job-runner, from this checkout: see job_runner/cli.py."""
+"""job-runner, from this checkout, with the settings in its .env: see job_runner/cli.py."""
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from job_runner.cli import main  # noqa: E402
+HERE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(HERE))
+from job_runner.cli import load_env, main  # noqa: E402
 
+load_env(HERE / ".env")
 sys.exit(main())

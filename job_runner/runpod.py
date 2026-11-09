@@ -9,8 +9,10 @@ CPUs a GPU and a driver for one of allowed_cuda_versions when they are given. Th
 key from PUBLIC_KEY, as RunPod's own images do. RUNPOD_API_KEY is the account's key, and
 RUNPOD_SSH_KEY_FILE the private key whose public half the pod is given. RunPod keeps no deadline,
 and renaming a pod may restart it, so each pod's run and deadline are kept here, in
-~/.local/state/job-runner/runpod/pods.json, where `job-runner runpod sweep` finds those past
-their deadline. A pod is reached as root at its public address, which never shows here.
+~/.local/state/job-runner/runpod/pods.json, where this workstation's watcher, `job-runner runpod
+watch`, finds those past their deadline and deletes them whatever has become of their run; rent
+rents nothing while the watcher does not run. A pod is reached as root at its public address,
+which never shows here.
 """
 
 import json
@@ -23,9 +25,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
-from pathlib import Path
 
-from .provider import RentError, Unreachable
+from .provider import RentError, Unreachable, state
+from .watcher import needed, watch, watching
 
 API = "https://rest.runpod.io/v1"
 # RunPod answers a want of room with a message rather than a code.
@@ -33,10 +35,6 @@ NO_ROOM = ("available", "capacity", "instances")
 # A new pod answers ssh within minutes; one that has not by then goes back.
 START_SECONDS = 900
 SSH_FAILED = 255
-
-
-def state():
-    return Path.home() / ".local/state/job-runner/runpod"
 
 
 class RunPodProvider:
@@ -54,14 +52,14 @@ class RunPodProvider:
         return json.loads(text) if text else {}
 
     def kept(self):
-        path = state() / "pods.json"
+        path = state("runpod") / "pods.json"
         return json.loads(path.read_text()) if path.exists() else {}
 
     def keep(self, pods):
-        state().mkdir(parents=True, exist_ok=True, mode=0o700)
-        temporary = state() / "pods.json.tmp"
+        state("runpod").mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = state("runpod") / "pods.json.tmp"
         temporary.write_text(json.dumps(pods, indent=1) + "\n")
-        temporary.replace(state() / "pods.json")
+        temporary.replace(state("runpod") / "pods.json")
 
     def answers(self, address, port):
         """Whether the pod takes connections to ssh's port."""
@@ -78,6 +76,8 @@ class RunPodProvider:
         return (pod["publicIp"], int(port)) if pod.get("publicIp") and port else None
 
     def rent(self, label, needs, hours, avoid=()):
+        if not watching("runpod"):
+            raise RentError(needed("runpod"))
         public = subprocess.run(["ssh-keygen", "-y", "-f", self.environment["RUNPOD_SSH_KEY_FILE"]],
                                 capture_output=True, text=True, check=True).stdout.strip()
         body = {"name": label, "computeType": needs.get("compute", "GPU"), "imageName": needs["image"],
@@ -136,7 +136,7 @@ class RunPodProvider:
         if route is None:
             raise Unreachable(ident)
         # Each pod keeps its own host key, so that one that takes over an address is not taken for another.
-        known = state() / "known_hosts"
+        known = state("runpod") / "known_hosts"
         known.mkdir(parents=True, exist_ok=True, mode=0o700)
         ssh = ["ssh", "-i", self.environment["RUNPOD_SSH_KEY_FILE"], "-p", str(route[1]), "-o", "IdentitiesOnly=yes",
                "-o", "BatchMode=yes", "-o", "ConnectTimeout=30", "-o", "ServerAliveInterval=15",
@@ -185,8 +185,7 @@ class RunPodProvider:
 
 
 def main(argv):
-    if argv != ["sweep"]:
-        print("usage: job-runner runpod sweep", file=sys.stderr)
+    if argv != ["watch"]:
+        print("usage: job-runner runpod watch", file=sys.stderr)
         return 2
-    RunPodProvider().sweep()
-    return 0
+    watch("runpod", RunPodProvider().sweep)

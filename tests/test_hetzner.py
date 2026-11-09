@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from job_runner import hetzner
 from job_runner.hetzner import DEADLINE, LABEL, HetznerProvider
-from job_runner.provider import RentError, Unreachable
+from job_runner.provider import RentError, Unreachable, state
 
 
 class Cloud:
@@ -96,10 +96,16 @@ class HetznerProviderTests(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.environment = {"HCLOUD_TOKEN": "token", "HCLOUD_URL": f"http://127.0.0.1:{self.server.server_port}",
                             "HETZNER_SSH_KEY_FILE": "/keys/hetzner", "PATH": f"{self.root}:{os.environ['PATH']}"}
+        self.home = patch.dict(os.environ, {"HOME": str(self.root)})
+        self.home.start()
+        # The watcher has just finished a round.
+        state("hetzner").mkdir(parents=True)
+        (state("hetzner") / "watched").touch()
         self.provider = HetznerProvider(self.environment)
         self.needs = {"server_type": "cpx51", "location": "hel1", "image": "ubuntu-24.04", "ssh_key": "jobs"}
 
     def tearDown(self):
+        self.home.stop()
         self.server.shutdown()
         self.server.server_close()
         self.directory.cleanup()
@@ -142,6 +148,16 @@ class HetznerProviderTests(unittest.TestCase):
         self.assertEqual(self.cloud.servers, {})
         self.assertIsNone(self.provider.release(ident))
 
+    def test_rents_nothing_while_its_watcher_has_not_finished_a_round_lately(self):
+        long_ago = time.time() - 600
+        os.utime(state("hetzner") / "watched", (long_ago, long_ago))
+        with self.assertRaisesRegex(RentError, "job-runner hetzner watch"):
+            self.rent()
+        (state("hetzner") / "watched").unlink()
+        with self.assertRaisesRegex(RentError, "job-runner hetzner watch"):
+            self.rent()
+        self.assertEqual((self.cloud.servers, self.cloud.requests), ({}, []))
+
     def test_sweep_deletes_only_the_servers_past_their_deadline(self):
         self.rent()
         self.rent()
@@ -160,14 +176,13 @@ class HetznerProviderTests(unittest.TestCase):
                           "sys.exit(255 if sys.argv[-1] == 'unreachable' else 3)\n")
         script.chmod(script.stat().st_mode | stat.S_IEXEC)
         ident, _ = self.rent()
-        with patch.dict(os.environ, {"HOME": str(self.root)}):
-            self.assertEqual(self.provider.run(ident, "fails", b"payload", 30), (3, ""))
-            with self.assertRaises(Unreachable):
-                self.provider.run(ident, "unreachable", None, 30)
+        self.assertEqual(self.provider.run(ident, "fails", b"payload", 30), (3, ""))
+        with self.assertRaises(Unreachable):
+            self.provider.run(ident, "unreachable", None, 30)
         ssh = json.loads(calls.read_text().splitlines()[0])
         self.assertEqual(ssh[:2], ["-i", "/keys/hetzner"])
         self.assertEqual(ssh[-2:], ["root@127.0.0.1", "fails"])
-        self.assertIn(f"UserKnownHostsFile={self.root / '.local/state/job-runner/hetzner' / ident}", ssh)
+        self.assertIn(f"UserKnownHostsFile={self.root / '.local/state/job-runner/hetzner/known_hosts' / ident}", ssh)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,13 @@ A store:
                                     an upload in parts, which machines send through presigned part URLs
 """
 
+from pathlib import Path
+
+
+def state(provider):
+    """Where this workstation keeps what it knows of the provider's machines."""
+    return Path.home() / ".local/state/job-runner" / provider
+
 
 class Unreachable(Exception):
     """The machine did not answer; a command that ran and failed is not this."""

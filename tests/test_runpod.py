@@ -16,7 +16,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 from job_runner import runpod
-from job_runner.provider import RentError, Unreachable
+from job_runner.provider import RentError, Unreachable, state
 from job_runner.runpod import RunPodProvider
 
 
@@ -81,6 +81,9 @@ class RunPodProviderTests(unittest.TestCase):
                             "RUNPOD_SSH_KEY_FILE": "/keys/runpod", "PATH": f"{self.root}:{os.environ['PATH']}"}
         self.home = patch.dict(os.environ, {"HOME": str(self.root), "PATH": self.environment["PATH"]})
         self.home.start()
+        # The watcher has just finished a round.
+        state("runpod").mkdir(parents=True)
+        (state("runpod") / "watched").touch()
         self.provider = RunPodProvider(self.environment)
         self.needs = {"gpus": ["NVIDIA GeForce RTX 5090"], "image": "runpod/base", "disk": 40}
 
@@ -146,6 +149,16 @@ class RunPodProviderTests(unittest.TestCase):
         self.assertEqual(self.cloud["pods"], {})
         self.assertIsNone(self.provider.extend(ident, 1))
         self.assertIsNone(RunPodProvider({**self.environment, "RUNPOD_URL": "http://127.0.0.1:9"}).machines("run"))
+
+    def test_rents_nothing_while_its_watcher_has_not_finished_a_round_lately(self):
+        long_ago = time.time() - 600
+        os.utime(state("runpod") / "watched", (long_ago, long_ago))
+        with self.assertRaisesRegex(RentError, "job-runner runpod watch"):
+            self.rent()
+        (state("runpod") / "watched").unlink()
+        with self.assertRaisesRegex(RentError, "job-runner runpod watch"):
+            self.rent()
+        self.assertEqual((self.cloud["pods"], self.cloud["requests"]), ({}, []))
 
     def test_sweep_deletes_only_the_pods_past_their_deadline(self):
         self.rent()

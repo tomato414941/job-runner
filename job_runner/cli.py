@@ -7,15 +7,21 @@
   job-runner stop DIRECTORY     ask the run to end now: its machines keep what they hold in the store and go back
   job-runner vast COMMAND ...   Vast.ai's machines, as vast/machines.py says: their offers, renting and
                                 checking one, the ledger, and the watcher that sends them back
-  job-runner hetzner sweep      delete the Hetzner Cloud servers of runs whose deadline has passed
-  job-runner runpod sweep       delete the RunPod pods of runs whose deadline has passed
+  job-runner hetzner watch      the watcher that deletes the Hetzner Cloud servers of runs whose deadline has passed
+  job-runner runpod watch       the watcher that deletes the RunPod pods of runs whose deadline has passed
+
+job-runner first takes the settings in .env beside install.sh, one NAME=VALUE a
+line, leaving alone those that the environment already gives: the providers'
+keys VAST_API_KEY, HCLOUD_TOKEN and RUNPOD_API_KEY, and whatever else its
+commands read. install.sh starts the watcher of each provider whose key .env
+gives, and a provider rents nothing while its watcher does not run.
 
 run keeps its memory, a copy of the record and a log of what it did,
 events.jsonl, in the directory, and exits 0 once the run is over. It takes the
 store's key from AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_ENDPOINT_URL,
 with AWS_SESSION_TOKEN and AWS_CREDENTIAL_EXPIRATION for a temporary key, and
-reaches the provider's machines with the SSH key in the file VAST_SSH_KEY_FILE
-names. It exits 75 when the store's key would expire before a URL it gives, so
+reaches the provider's machines with the SSH key in the file that
+VAST_SSH_KEY_FILE, HETZNER_SSH_KEY_FILE or RUNPOD_SSH_KEY_FILE names. It exits 75 when the store's key would expire before a URL it gives, so
 it runs best as a service that starts it again with new keys:
   systemd-run --user --unit job-runner-NAME -p Restart=on-failure -p RestartSec=60 -- KEYS job-runner run DIRECTORY
 where KEYS is the command that gives it its keys. check needs the same keys and
@@ -26,7 +32,7 @@ run with the same spec carries on from what the store keeps.
 
 import argparse
 import json
-import subprocess
+import os
 import sys
 import time
 from pathlib import Path
@@ -116,6 +122,17 @@ def wait(args):
     return 0 if remembered.outcome == "complete" else 1
 
 
+def load_env(path):
+    """Put the settings in the file, one NAME=VALUE a line, into the environment, leaving alone those that the
+    environment already gives a value; an empty value counts as none, as a caller that only clears a key means."""
+    if path.exists():
+        for line in path.read_text().splitlines():
+            name, equals, value = line.partition("=")
+            name = name.strip()
+            if equals and name and not name.startswith("#") and not os.environ.get(name):
+                os.environ[name] = value.strip().strip("\"'")
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
     if argv[:1] == ["hetzner"]:
@@ -129,7 +146,8 @@ def main(argv=None):
     if argv[:1] == ["vast"]:
         from .vast import MACHINES
 
-        return subprocess.run([sys.executable, str(MACHINES), *argv[1:]]).returncode
+        # The script takes this process's place, so that signals and its exit code are its own.
+        os.execv(sys.executable, [sys.executable, str(MACHINES), *argv[1:]])
     parser = argparse.ArgumentParser(prog="job-runner", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(required=True)
