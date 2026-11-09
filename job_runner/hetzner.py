@@ -42,7 +42,7 @@ class HetznerProvider:
     def request(self, method, path, body=None):
         request = urllib.request.Request(
             self.api + path, method=method, data=None if body is None else json.dumps(body).encode(),
-            headers={"Authorization": "Bearer " + self.environment["HCLOUD_TOKEN"], "Content-Type": "application/json"})
+            headers={"Authorization": "Bearer " + self.environment["HCLOUD_TOKEN"], "Content-Type": "application/json", "User-Agent": "job-runner"})
         with urllib.request.urlopen(request, timeout=60) as answer:
             text = answer.read()
         return json.loads(text) if text else {}

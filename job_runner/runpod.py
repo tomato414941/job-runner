@@ -48,7 +48,7 @@ class RunPodProvider:
         request = urllib.request.Request(
             self.api + path, method=method, data=None if body is None else json.dumps(body).encode(),
             headers={"Authorization": "Bearer " + self.environment["RUNPOD_API_KEY"],
-                     "Content-Type": "application/json"})
+                     "Content-Type": "application/json", "User-Agent": "job-runner"})
         with urllib.request.urlopen(request, timeout=60) as answer:
             text = answer.read()
         return json.loads(text) if text else {}

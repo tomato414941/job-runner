@@ -37,6 +37,9 @@ def handler(cloud):
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length)) if length else None
             cloud["requests"].append((self.command, parts.path, body))
+            # RunPod's API sits behind Cloudflare, which turns away Python's own User-Agent (error code 1010).
+            if not self.headers.get("User-Agent", "").startswith("job-runner"):
+                return self.answer(403, b"error code: 1010")
             ident = parts.path.rsplit("/", 1)[1] if parts.path.count("/") == 2 else None
             if self.command == "POST":
                 if body.get("gpuTypeIds") == ["scarce"]:
