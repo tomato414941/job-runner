@@ -1,16 +1,19 @@
 """Servers from Hetzner Cloud, rented by the hour for a run and deleted when it is done.
 
 The spec's provider says what to rent:
-  {"kind": "hetzner", "server_type": "cpx51", "location": "hel1", "image": "ubuntu-24.04", "ssh_key": NAME}
-ssh_key names a key already in the Hetzner Cloud project, whose private half is the file
-HETZNER_SSH_KEY_FILE names; HCLOUD_TOKEN is the project's API token. Each server carries the
-run's label and its deadline as labels, so that this workstation's watcher, `job-runner hetzner
-watch`, deletes the servers past their deadline whatever has become of their run; rent rents
-nothing while the watcher does not run with the same token. A server is reached as root at its address, which
-never shows here. Costs are counted in dollars, so rent rents nothing either from an account
-that Hetzner bills in another currency.
+  {"kind": "hetzner", "server_type": "cpx51", "location": "hel1", "image": "ubuntu-24.04"}
+HCLOUD_TOKEN is the API token of the Hetzner Cloud project to rent in, and HETZNER_SSH_KEY_FILE
+the private key whose public half each server is given; rent adds that half to the project's
+keys when it is not among them. Each server carries the run's label and its deadline as labels,
+so that this workstation's watcher, `job-runner hetzner watch`, deletes the servers past their
+deadline whatever has become of their run; rent rents nothing while the watcher does not run
+with the same token. A server is reached as root at its address, which never shows here. Costs
+are counted in dollars, so rent rents nothing either from an account that Hetzner bills in
+another currency.
 """
 
+import base64
+import hashlib
 import json
 import math
 import os
@@ -64,14 +67,16 @@ class HetznerProvider:
     def rent(self, label, needs, hours, avoid=()):
         if not watching("hetzner", self.environment["HCLOUD_TOKEN"]):
             raise RentError(needed("hetzner"))
+        public = subprocess.run(["ssh-keygen", "-y", "-f", self.environment["HETZNER_SSH_KEY_FILE"]],
+                                capture_output=True, text=True, check=True, env=self.environment).stdout.strip()
         deadline = int(time.time() + hours * 3600)
         body = {"name": f"{label}-{deadline}"[-63:].lstrip("-"), "server_type": needs["server_type"],
-                "image": needs["image"], "location": needs["location"], "ssh_keys": [needs["ssh_key"]],
+                "image": needs["image"], "location": needs["location"],
                 "labels": {LABEL: label, DEADLINE: str(deadline)}, "start_after_create": True}
         try:
             if self.request("GET", "/pricing")["pricing"]["currency"] != "USD":
                 raise RentError("job-runner counts costs in dollars, and Hetzner bills this account in another currency")
-            server = self.request("POST", "/servers", body)["server"]
+            server = self.request("POST", "/servers", {**body, "ssh_keys": [self.key(public)]})["server"]
         except urllib.error.HTTPError as error:
             code = json.loads(error.read() or b"{}").get("error", {}).get("code")
             if code in UNAVAILABLE:
@@ -90,6 +95,23 @@ class HetznerProvider:
             time.sleep(5)
         self.release(ident)
         raise RentError(f"the server did not answer ssh within {START_SECONDS // 60} minutes, and it was deleted")
+
+    def key(self, public):
+        """The name of the project's copy of a public key, which is added to the project when it holds none."""
+        digest = hashlib.md5(base64.b64decode(public.split()[1]), usedforsecurity=False).hexdigest()
+        # Hetzner finds a key by this fingerprint of it.
+        query = urllib.parse.urlencode({"fingerprint": ":".join(digest[at:at + 2] for at in range(0, 32, 2))})
+        held = self.request("GET", f"/ssh_keys?{query}")["ssh_keys"]
+        if not held:
+            try:
+                held = [self.request("POST", "/ssh_keys",
+                                     {"name": f"job-runner-{digest[:12]}", "public_key": public})["ssh_key"]]
+            except urllib.error.HTTPError as error:
+                # Another run may have added it meanwhile.
+                held = self.request("GET", f"/ssh_keys?{query}")["ssh_keys"] if error.code == 409 else []
+                if not held:
+                    raise
+        return held[0]["name"]
 
     @staticmethod
     def cost(server):

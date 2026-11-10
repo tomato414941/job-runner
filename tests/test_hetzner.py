@@ -1,6 +1,9 @@
-"""HetznerProvider against a stand-in for Hetzner Cloud's API kept in memory, and a stand-in for ssh on its PATH."""
+"""HetznerProvider against a stand-in for Hetzner Cloud's API kept in memory, and stand-ins for ssh and ssh-keygen on
+its PATH."""
 
+import base64
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -22,10 +25,19 @@ from job_runner.watcher import mark
 
 
 class Cloud:
-    """The servers a stand-in API holds, and the requests it took."""
+    """The servers and keys a stand-in API holds, and the requests it took."""
 
     def __init__(self):
-        self.servers, self.requests, self.next, self.currency = {}, [], 1, "USD"
+        self.servers, self.keys, self.requests, self.next, self.currency = {}, {}, [], 1, "USD"
+        # How many of the next listings of keys miss a key that is there, as when another run adds it meanwhile.
+        self.late = 0
+
+    def key(self, body):
+        digest = hashlib.md5(base64.b64decode(body["public_key"].split()[1])).hexdigest()
+        key = {"id": 101 + len(self.keys), "name": body["name"], "public_key": body["public_key"],
+               "fingerprint": ":".join(digest[at:at + 2] for at in range(0, 32, 2))}
+        self.keys[key["id"]] = key
+        return key
 
     def server(self, body):
         location = body["location"]
@@ -60,7 +72,7 @@ def handler(cloud):
             body = self.body()
             cloud.requests.append((self.command, parts.path, body))
             ident = int(parts.path.rsplit("/", 1)[1]) if parts.path.count("/") == 2 else None
-            if self.command == "POST":
+            if self.command == "POST" and parts.path == "/servers":
                 if body["server_type"] == "scarce":
                     return self.answer(412, {"error": {"code": "resource_unavailable"}})
                 if body["server_type"] == "forbidden":
@@ -68,6 +80,17 @@ def handler(cloud):
                 return self.answer(201, {"server": cloud.server(body)})
             if self.command == "GET" and parts.path == "/pricing":
                 return self.answer(200, {"pricing": {"currency": cloud.currency}})
+            if self.command == "GET" and parts.path == "/ssh_keys":
+                fingerprint = parse_qs(parts.query)["fingerprint"][0]
+                if cloud.late:
+                    cloud.late -= 1
+                    return self.answer(200, {"ssh_keys": []})
+                return self.answer(200, {"ssh_keys": [key for key in cloud.keys.values()
+                                                      if key["fingerprint"] == fingerprint]})
+            if self.command == "POST" and parts.path == "/ssh_keys":
+                if any(key["public_key"] == body["public_key"] for key in cloud.keys.values()):
+                    return self.answer(409, {"error": {"code": "uniqueness_error"}})
+                return self.answer(201, {"ssh_key": cloud.key(body)})
             if self.command == "GET" and ident is None:
                 selector = parse_qs(parts.query)["label_selector"][0]
                 key, _, value = selector.partition("==")
@@ -99,13 +122,17 @@ class HetznerProviderTests(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.environment = {"HCLOUD_TOKEN": "token", "HCLOUD_URL": f"http://127.0.0.1:{self.server.server_port}",
                             "HETZNER_SSH_KEY_FILE": "/keys/hetzner", "PATH": f"{self.root}:{os.environ['PATH']}"}
+        # The public half of the key in the file that HETZNER_SSH_KEY_FILE names, and of no other.
+        keygen = self.root / "ssh-keygen"
+        keygen.write_text("#!/bin/sh\n[ \"$*\" = '-y -f /keys/hetzner' ] && echo 'ssh-ed25519 AAAA public'\n")
+        keygen.chmod(keygen.stat().st_mode | stat.S_IEXEC)
         self.home = patch.dict(os.environ, {"HOME": str(self.root)})
         self.home.start()
         # The watcher has just finished a round with the token.
         state("hetzner").mkdir(parents=True)
         (state("hetzner") / "watched").write_text(mark("token"))
         self.provider = HetznerProvider(self.environment)
-        self.needs = {"server_type": "cpx51", "location": "hel1", "image": "ubuntu-24.04", "ssh_key": "jobs"}
+        self.needs = {"server_type": "cpx51", "location": "hel1", "image": "ubuntu-24.04"}
 
     def tearDown(self):
         self.home.stop()
@@ -119,12 +146,23 @@ class HetznerProviderTests(unittest.TestCase):
 
     def test_rents_a_server_labelled_with_its_run_and_deadline_or_none_when_there_is_no_room(self):
         self.assertEqual(self.rent(), ("1", 0.0))
-        method, path, body = next(request for request in self.cloud.requests if request[0] == "POST")
-        self.assertEqual((method, path, body["ssh_keys"], body["labels"][LABEL]), ("POST", "/servers", ["jobs"], "run"))
+        body = next(body for method, path, body in self.cloud.requests if (method, path) == ("POST", "/servers"))
+        self.assertEqual(body["labels"][LABEL], "run")
         self.assertAlmostEqual(int(body["labels"][DEADLINE]), time.time() + 7200, delta=60)
         self.assertEqual(self.rent({**self.needs, "server_type": "scarce"}), (None, 0.0))
         with self.assertRaisesRegex(RentError, "forbidden"):
             self.rent({**self.needs, "server_type": "forbidden"})
+
+    def test_gives_each_server_the_public_half_of_its_key_which_it_adds_to_the_project_once(self):
+        self.rent()
+        self.rent()
+        # Another run added the key between the look for it and the adding of it.
+        self.cloud.late = 1
+        self.rent()
+        (key,) = self.cloud.keys.values()
+        self.assertEqual(key["public_key"], "ssh-ed25519 AAAA public")
+        self.assertEqual([body["ssh_keys"] for method, path, body in self.cloud.requests
+                          if (method, path) == ("POST", "/servers")], [[key["name"]]] * 3)
 
     def test_rents_nothing_from_an_account_billed_in_another_currency_than_dollars(self):
         self.cloud.currency = "EUR"

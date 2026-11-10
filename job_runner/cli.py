@@ -22,8 +22,10 @@ events.jsonl, in the directory, and exits 0 once the run is over. It takes the
 store's key from AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_ENDPOINT_URL,
 with AWS_SESSION_TOKEN and AWS_CREDENTIAL_EXPIRATION for a temporary key, and
 reaches the provider's machines with the SSH key in the file that
-VAST_SSH_KEY_FILE, HETZNER_SSH_KEY_FILE or RUNPOD_SSH_KEY_FILE names. It exits 75 when the store's key would expire before a URL it gives, so
-it runs best as a service that starts it again with new keys:
+VAST_SSH_KEY_FILE, HETZNER_SSH_KEY_FILE or RUNPOD_SSH_KEY_FILE names, whose
+public half it gives each machine it rents. It exits 75 when the store's key
+would expire before a URL it gives, so it runs best as a service that starts
+it again with new keys:
   systemd-run --user --unit job-runner-NAME -p Restart=on-failure -p RestartSec=60 -- KEYS job-runner run DIRECTORY
 where KEYS is the command that gives it its keys. check needs the same keys and
 changes nothing; status and wait read the directory alone. stop writes the
