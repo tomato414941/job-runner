@@ -14,7 +14,8 @@ job-runner first takes the settings in .env beside install.sh, one NAME=VALUE a
 line, leaving alone those that the environment already gives: the providers'
 keys VAST_API_KEY, HCLOUD_TOKEN and RUNPOD_API_KEY, and whatever else its
 commands read. install.sh starts the watcher of each provider whose key .env
-gives, and a provider rents nothing while its watcher does not run.
+gives, and a provider rents nothing while its watcher does not run with the
+key that rents.
 
 run keeps its memory, a copy of the record and a log of what it did,
 events.jsonl, in the directory, and exits 0 once the run is over. It takes the

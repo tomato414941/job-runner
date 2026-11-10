@@ -6,7 +6,7 @@ ssh_key names a key already in the Hetzner Cloud project, whose private half is 
 HETZNER_SSH_KEY_FILE names; HCLOUD_TOKEN is the project's API token. Each server carries the
 run's label and its deadline as labels, so that this workstation's watcher, `job-runner hetzner
 watch`, deletes the servers past their deadline whatever has become of their run; rent rents
-nothing while the watcher does not run. A server is reached as root at its address, which
+nothing while the watcher does not run with the same token. A server is reached as root at its address, which
 never shows here. Costs are counted in dollars, so rent rents nothing either from an account
 that Hetzner bills in another currency.
 """
@@ -62,7 +62,7 @@ class HetznerProvider:
             return False
 
     def rent(self, label, needs, hours, avoid=()):
-        if not watching("hetzner"):
+        if not watching("hetzner", self.environment["HCLOUD_TOKEN"]):
             raise RentError(needed("hetzner"))
         deadline = int(time.time() + hours * 3600)
         body = {"name": f"{label}-{deadline}"[-63:].lstrip("-"), "server_type": needs["server_type"],
@@ -166,4 +166,5 @@ def main(argv):
     if argv != ["watch"]:
         print("usage: job-runner hetzner watch", file=sys.stderr)
         return 2
-    watch("hetzner", HetznerProvider().sweep)
+    provider = HetznerProvider()
+    watch("hetzner", provider.environment["HCLOUD_TOKEN"], provider.sweep)

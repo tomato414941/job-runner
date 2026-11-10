@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 from job_runner import hetzner
 from job_runner.hetzner import DEADLINE, LABEL, HetznerProvider
 from job_runner.provider import RentError, Unreachable, state
+from job_runner.watcher import mark
 
 
 class Cloud:
@@ -100,9 +101,9 @@ class HetznerProviderTests(unittest.TestCase):
                             "HETZNER_SSH_KEY_FILE": "/keys/hetzner", "PATH": f"{self.root}:{os.environ['PATH']}"}
         self.home = patch.dict(os.environ, {"HOME": str(self.root)})
         self.home.start()
-        # The watcher has just finished a round.
+        # The watcher has just finished a round with the token.
         state("hetzner").mkdir(parents=True)
-        (state("hetzner") / "watched").touch()
+        (state("hetzner") / "watched").write_text(mark("token"))
         self.provider = HetznerProvider(self.environment)
         self.needs = {"server_type": "cpx51", "location": "hel1", "image": "ubuntu-24.04", "ssh_key": "jobs"}
 
@@ -156,7 +157,11 @@ class HetznerProviderTests(unittest.TestCase):
         self.assertEqual(self.cloud.servers, {})
         self.assertIsNone(self.provider.release(ident))
 
-    def test_rents_nothing_while_its_watcher_has_not_finished_a_round_lately(self):
+    def test_rents_nothing_while_its_watcher_has_not_lately_finished_a_round_with_its_token(self):
+        (state("hetzner") / "watched").write_text(mark("another token"))
+        with self.assertRaisesRegex(RentError, "job-runner hetzner watch"):
+            self.rent()
+        (state("hetzner") / "watched").write_text(mark("token"))
         long_ago = time.time() - 600
         os.utime(state("hetzner") / "watched", (long_ago, long_ago))
         with self.assertRaisesRegex(RentError, "job-runner hetzner watch"):

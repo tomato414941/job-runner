@@ -23,7 +23,7 @@ class WatcherTests(unittest.TestCase):
                 raise OSError("no answer from 203.0.113.9")
 
         def sleep(seconds):
-            marked.append(watching("hetzner"))
+            marked.append(watching("hetzner", "key"))
             if len(rounds) == 2:
                 raise Stop
 
@@ -31,8 +31,10 @@ class WatcherTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"HOME": directory}), \
                 patch.object(watcher.time, "sleep", sleep), contextlib.redirect_stderr(said):
             with self.assertRaises(Stop):
-                watch("hetzner", sweep)
-            self.assertFalse(watching("runpod"))
+                watch("hetzner", "key", sweep)
+            # It watches the machines of its own key, and of its own provider.
+            self.assertFalse(watching("hetzner", "another key"))
+            self.assertFalse(watching("runpod", "key"))
         self.assertEqual((rounds, marked), ([0, 1], [False, True]))
         # A failed round tells the error's kind, never its message, which can name an address.
         self.assertIn("OSError", said.getvalue())

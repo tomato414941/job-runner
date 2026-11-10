@@ -11,7 +11,7 @@ RUNPOD_SSH_KEY_FILE the private key whose public half the pod is given. RunPod k
 and renaming a pod may restart it, so each pod's run and deadline are kept here, in
 ~/.local/state/job-runner/runpod/pods.json, where this workstation's watcher, `job-runner runpod
 watch`, finds those past their deadline and deletes them whatever has become of their run; rent
-rents nothing while the watcher does not run. A pod is reached as root at its public address,
+rents nothing while the watcher does not run with the same key. A pod is reached as root at its public address,
 which never shows here.
 """
 
@@ -76,7 +76,7 @@ class RunPodProvider:
         return (pod["publicIp"], int(port)) if pod.get("publicIp") and port else None
 
     def rent(self, label, needs, hours, avoid=()):
-        if not watching("runpod"):
+        if not watching("runpod", self.environment["RUNPOD_API_KEY"]):
             raise RentError(needed("runpod"))
         public = subprocess.run(["ssh-keygen", "-y", "-f", self.environment["RUNPOD_SSH_KEY_FILE"]],
                                 capture_output=True, text=True, check=True).stdout.strip()
@@ -188,4 +188,5 @@ def main(argv):
     if argv != ["watch"]:
         print("usage: job-runner runpod watch", file=sys.stderr)
         return 2
-    watch("runpod", RunPodProvider().sweep)
+    provider = RunPodProvider()
+    watch("runpod", provider.environment["RUNPOD_API_KEY"], provider.sweep)
