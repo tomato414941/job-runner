@@ -30,7 +30,7 @@ class Cloud:
         location = body["location"]
         server = {"id": self.next, "name": body["name"], "status": "running", "labels": body["labels"],
                   "created": datetime.now(UTC).isoformat(), "public_net": {"ipv4": {"ip": "127.0.0.1"}},
-                  "datacenter": {"location": {"name": location}},
+                  "location": {"name": location},
                   "server_type": {"name": body["server_type"],
                                   "prices": [{"location": location, "price_hourly": {"gross": "0.0500"}}]}}
         self.servers[self.next] = server

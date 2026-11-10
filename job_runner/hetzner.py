@@ -91,7 +91,7 @@ class HetznerProvider:
     @staticmethod
     def cost(server):
         """Euros so far: each hour begun at the server type's hourly price in its location."""
-        location = server["datacenter"]["location"]["name"]
+        location = server["location"]["name"]
         hourly = next(float(price["price_hourly"]["gross"]) for price in server["server_type"]["prices"]
                       if price["location"] == location)
         hours = (time.time() - datetime.fromisoformat(server["created"]).timestamp()) / 3600
