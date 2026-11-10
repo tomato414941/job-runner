@@ -24,7 +24,7 @@ class Cloud:
     """The servers a stand-in API holds, and the requests it took."""
 
     def __init__(self):
-        self.servers, self.requests, self.next = {}, [], 1
+        self.servers, self.requests, self.next, self.currency = {}, [], 1, "USD"
 
     def server(self, body):
         location = body["location"]
@@ -65,6 +65,8 @@ def handler(cloud):
                 if body["server_type"] == "forbidden":
                     return self.answer(403, {"error": {"code": "forbidden"}})
                 return self.answer(201, {"server": cloud.server(body)})
+            if self.command == "GET" and parts.path == "/pricing":
+                return self.answer(200, {"pricing": {"currency": cloud.currency}})
             if self.command == "GET" and ident is None:
                 selector = parse_qs(parts.query)["label_selector"][0]
                 key, _, value = selector.partition("==")
@@ -116,12 +118,18 @@ class HetznerProviderTests(unittest.TestCase):
 
     def test_rents_a_server_labelled_with_its_run_and_deadline_or_none_when_there_is_no_room(self):
         self.assertEqual(self.rent(), ("1", 0.0))
-        method, path, body = self.cloud.requests[0]
+        method, path, body = next(request for request in self.cloud.requests if request[0] == "POST")
         self.assertEqual((method, path, body["ssh_keys"], body["labels"][LABEL]), ("POST", "/servers", ["jobs"], "run"))
         self.assertAlmostEqual(int(body["labels"][DEADLINE]), time.time() + 7200, delta=60)
         self.assertEqual(self.rent({**self.needs, "server_type": "scarce"}), (None, 0.0))
         with self.assertRaisesRegex(RentError, "forbidden"):
             self.rent({**self.needs, "server_type": "forbidden"})
+
+    def test_rents_nothing_from_an_account_billed_in_another_currency_than_dollars(self):
+        self.cloud.currency = "EUR"
+        with self.assertRaisesRegex(RentError, "dollars"):
+            self.rent()
+        self.assertEqual(self.cloud.servers, {})
 
     def test_deletes_a_server_that_never_answers_ssh(self):
         with patch.object(HetznerProvider, "answers", return_value=False), patch.object(hetzner, "START_SECONDS", 0.05), \
@@ -166,7 +174,7 @@ class HetznerProviderTests(unittest.TestCase):
         with contextlib.redirect_stdout(printed):
             self.provider.sweep()
         self.assertEqual(list(self.cloud.servers), [2])
-        self.assertEqual(json.loads(printed.getvalue()), {"deleted": 1, "label": "run", "euros": 0.05})
+        self.assertEqual(json.loads(printed.getvalue()), {"deleted": 1, "label": "run", "dollars": 0.05})
 
     def test_runs_a_command_as_root_over_ssh_and_takes_ssh_failure_for_no_answer(self):
         calls = self.root / "calls.jsonl"

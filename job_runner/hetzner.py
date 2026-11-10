@@ -7,7 +7,8 @@ HETZNER_SSH_KEY_FILE names; HCLOUD_TOKEN is the project's API token. Each server
 run's label and its deadline as labels, so that this workstation's watcher, `job-runner hetzner
 watch`, deletes the servers past their deadline whatever has become of their run; rent rents
 nothing while the watcher does not run. A server is reached as root at its address, which
-never shows here.
+never shows here. Costs are counted in dollars, so rent rents nothing either from an account
+that Hetzner bills in another currency.
 """
 
 import json
@@ -68,6 +69,8 @@ class HetznerProvider:
                 "image": needs["image"], "location": needs["location"], "ssh_keys": [needs["ssh_key"]],
                 "labels": {LABEL: label, DEADLINE: str(deadline)}, "start_after_create": True}
         try:
+            if self.request("GET", "/pricing")["pricing"]["currency"] != "USD":
+                raise RentError("job-runner counts costs in dollars, and Hetzner bills this account in another currency")
             server = self.request("POST", "/servers", body)["server"]
         except urllib.error.HTTPError as error:
             code = json.loads(error.read() or b"{}").get("error", {}).get("code")
@@ -90,7 +93,7 @@ class HetznerProvider:
 
     @staticmethod
     def cost(server):
-        """Euros so far: each hour begun at the server type's hourly price in its location."""
+        """Dollars so far: each hour begun at the server type's hourly price in its location."""
         location = server["location"]["name"]
         hourly = next(float(price["price_hourly"]["gross"]) for price in server["server_type"]["prices"]
                       if price["location"] == location)
@@ -156,7 +159,7 @@ class HetznerProvider:
         for server in self.servers(LABEL):
             if int(server["labels"].get(DEADLINE, "0")) < now:
                 print(json.dumps({"deleted": server["id"], "label": server["labels"].get(LABEL),
-                                  "euros": self.release(str(server["id"]))}), flush=True)
+                                  "dollars": self.release(str(server["id"]))}), flush=True)
 
 
 def main(argv):
