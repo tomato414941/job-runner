@@ -31,6 +31,7 @@ def train(name, steps, *extra, inputs=()):
             "inputs": list(inputs), "outputs": [f"out/{name}/last.pt"], "rate": 1000 / 0.02, "units": steps * 1000}
 
 
+@unittest.skipUnless(shutil.which("uv"), "the rehearsal's machines install the agent with uv, which this machine lacks")
 class RehearsalTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
