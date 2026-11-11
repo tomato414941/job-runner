@@ -217,17 +217,19 @@ def typical(ledger, gpu, version):
     return medians, len(checks)
 
 
-def default_power(ledger, gpu):
-    """The default power limit that checked machines with this GPU reported, or None before the first check."""
+def lowest_default_power(ledger, gpu):
+    """The lowest default power limit that a checked machine with this GPU reported, or None before the first check.
+    Makers give one GPU different defaults, an RTX 5090 575 W or 600 W, and an offer names only its limit, so a
+    limit is below its machine's default for sure only when it is below the lowest."""
     values = [row["power_default_w"] for entry in ledger if entry["event"] == "checked" and entry.get("gpu") == gpu
               for row in entry["results"].get("gpus") or [] if row.get("power_default_w")]
-    return statistics.median(values) if values else None
+    return min(values) if values else None
 
 
 def choose(offers, ledger, avoid=()):
     """The offers to try, in order: without the machines that failed once or that the instances in avoid ran on, nor
-    offers whose power limit is below the default of checked machines with the same GPU; hosts that failed before
-    after the rest; each group cheapest first."""
+    offers whose power limit is below the lowest default of checked machines with the same GPU, which the check then
+    holds to its own default; hosts that failed before after the rest; each group cheapest first."""
     left_out, failures, defaults, kept = avoided(ledger), failing_hosts(ledger), {}, []
     held = rentals(ledger)
     left_out |= {(PROVIDER, held[instance]["machine"]) for instance in avoid if instance in held}
@@ -236,7 +238,7 @@ def choose(offers, ledger, avoid=()):
             continue
         gpu = offer["gpu_name"]
         if gpu not in defaults:
-            defaults[gpu] = default_power(ledger, gpu)
+            defaults[gpu] = lowest_default_power(ledger, gpu)
         limit = offer.get("gpu_max_power")
         if defaults[gpu] and limit and limit < defaults[gpu] - 1:
             continue

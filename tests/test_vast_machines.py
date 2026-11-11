@@ -137,8 +137,11 @@ class ChoiceTest(LedgerTestCase):
         chosen = machines.choose(offers, machines.entries())
         self.assertEqual([each["machine_id"] for each in chosen], [5, 4, 6, 3])
 
-    def test_leaves_out_offers_whose_power_limit_is_below_the_default_of_checked_machines_with_the_same_gpu(self):
+    def test_leaves_out_offers_whose_power_limit_is_below_the_lowest_default_of_checked_machines_with_the_same_gpu(self):
+        # Two of three checked machines default to 600 W; a machine whose default is 575 W still offers its own.
         self.passed(1, default=575.0)
+        self.passed(6, default=600.0)
+        self.passed(7, default=600.0)
         offers = [offer(2, 20, 0.4, power=450.0), offer(3, 30, 0.5, power=575.0), offer(4, 40, 0.6, power=600.0),
                   offer(5, 50, 0.3, gpu="RTX 4090", power=450.0)]
         chosen = machines.choose(offers, machines.entries())
