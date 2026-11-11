@@ -51,9 +51,6 @@ class LedgerTestCase(unittest.TestCase):
         moved = patch.object(machines, "folder", self.folder)
         moved.start()
         self.addCleanup(moved.stop)
-        settings = patch.object(machines, "ENV_FILE", self.folder / ".env")
-        settings.start()
-        self.addCleanup(settings.stop)
         # A ledger in a test's own folder is never shared; a test that reached R2 all the same fails.
         offline = patch.object(machines.shared_ledger, "request", side_effect=AssertionError("a test reached R2"))
         offline.start()
@@ -619,31 +616,6 @@ class AccessTest(LedgerTestCase):
                 with self.assertRaises(SystemExit) as stopped:
                     machines.main(["return", "7"])
         self.assertIn("VAST_API_KEY", str(stopped.exception))
-
-    def test_takes_vast_api_key_from_the_env_file_when_the_environment_lacks_it(self):
-        machines.ENV_FILE.write_text("# Vast.ai\nVAST_API_KEY=from-the-file\n")
-        seen = []
-        with patch.dict(os.environ), \
-                patch.dict(machines.COMMANDS, {"return": lambda args: seen.append(os.environ["VAST_API_KEY"])}):
-            os.environ.pop("VAST_API_KEY", None)
-            machines.main(["return", "7"])
-        self.assertEqual(seen, ["from-the-file"])
-
-    def test_fills_an_empty_vast_api_key_from_the_env_file(self):
-        machines.ENV_FILE.write_text("VAST_API_KEY=from-the-file\n")
-        seen = []
-        with patch.dict(os.environ, {"VAST_API_KEY": ""}), \
-                patch.dict(machines.COMMANDS, {"return": lambda args: seen.append(os.environ["VAST_API_KEY"])}):
-            machines.main(["return", "7"])
-        self.assertEqual(seen, ["from-the-file"])
-
-    def test_keeps_the_vast_api_key_that_the_environment_already_has(self):
-        machines.ENV_FILE.write_text("VAST_API_KEY=from-the-file\n")
-        seen = []
-        with patch.dict(os.environ, {"VAST_API_KEY": "from-the-environment"}), \
-                patch.dict(machines.COMMANDS, {"return": lambda args: seen.append(os.environ["VAST_API_KEY"])}):
-            machines.main(["return", "7"])
-        self.assertEqual(seen, ["from-the-environment"])
 
     def test_takes_the_public_key_from_the_file_that_vast_ssh_key_file_names(self):
         key = self.folder / "key"

@@ -2,7 +2,7 @@
 machine see the same ledger.
 
 The settings are LEDGER_R2_ENDPOINT (https://ACCOUNT.r2.cloudflarestorage.com), LEDGER_R2_BUCKET,
-LEDGER_R2_ACCESS_KEY_ID and LEDGER_R2_SECRET_ACCESS_KEY, which machines.py takes from job-runner's .env. Without them
+LEDGER_R2_ACCESS_KEY_ID and LEDGER_R2_SECRET_ACCESS_KEY, which job-runner takes from its .env. Without them
 the ledger stays on the machine. Objects are named by the time they were uploaded, so that a listing that starts a
 little before the newest object a machine has seen finds whatever has come since, from any machine.
 

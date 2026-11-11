@@ -22,8 +22,8 @@ become of the work. rent rents nothing while the watcher does not run with the k
 the machines of its own key's account alone. return records that the machine is to go back before it destroys it, so
 that a return that fails is the watcher's to finish.
 
-rent, list, ssh-config, return and watch need the Vast.ai API key in VAST_API_KEY, which this script takes from
-job-runner's .env, one NAME=VALUE a line, unless the environment already gives it. rent and ssh-config need the caller's SSH key as
+rent, list, ssh-config, return and watch need the Vast.ai API key in VAST_API_KEY, which job-runner takes from its
+.env, one NAME=VALUE a line, unless the environment already gives it. rent and ssh-config need the caller's SSH key as
 the private key file that VAST_SSH_KEY_FILE names. rent gives its public half to the machine it rents, and only to that
 machine, checks the machine over ssh with that key, the way the work will reach it, and writes how to reach the
 machine it keeps to data/ssh/INSTANCE.config, printing that path with the machine's deadline: the work reaches the
@@ -71,8 +71,6 @@ import machine_check
 import shared_ledger
 
 HERE = Path(__file__).resolve().parent
-# job-runner's settings, such as VAST_API_KEY, one NAME=VALUE a line; what the environment already has wins.
-ENV_FILE = HERE.parent / ".env"
 # Vast.ai's API, whose list of instances has moved to its second version.
 API = os.environ.get("VAST_URL", "https://console.vast.ai").rstrip("/") + "/api"
 PROVIDER = "vast"
@@ -909,24 +907,12 @@ COMMANDS = {"offers": list_offers, "rent": rent, "ssh-config": ssh_config, "exte
             "reject": reject, "return": give_back, "list": list_machines, "ledger": show_ledger, "watch": watch}
 
 
-def load_env():
-    """Put the settings in .env into the environment, leaving alone those that the environment already gives a value;
-    an empty value counts as none, as a caller that only clears VAST_API_KEY means."""
-    if ENV_FILE.exists():
-        for line in ENV_FILE.read_text().splitlines():
-            name, equals, value = line.partition("=")
-            name = name.strip()
-            if equals and name and not name.startswith("#") and not os.environ.get(name):
-                os.environ[name] = value.strip().strip("\"'")
-
-
 def main(argv=None):
     global folder
     argv = sys.argv[1:] if argv is None else argv
     args = parser().parse_args(argv)
     if args.data:
         folder = Path(args.data)
-    load_env()
     if args.command in KEYED and not os.environ.get("VAST_API_KEY"):
         raise SystemExit(f"{args.command} needs the Vast.ai API key in VAST_API_KEY, in .env or the environment")
     try:
