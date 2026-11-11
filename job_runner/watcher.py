@@ -4,7 +4,7 @@ Round after round a watcher deletes the machines of runs whose deadline has pass
 runs, and marks each round it finishes with the key it watches with. Renting needs it: a provider rents nothing while
 its watcher has not lately finished a round with the key that rents, since a watcher sees the machines of its own
 key's account alone. job-runner's install.sh starts `job-runner PROVIDER watch` for each provider whose key .env
-gives. Vast.ai's watcher is vast/machines.py's own.
+gives. Vast.ai's watcher is vast/machines.py's own, which marks its rounds with its key the same way.
 """
 
 import hashlib

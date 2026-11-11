@@ -317,6 +317,13 @@ class WatchTest(LedgerTestCase):
         with patch.object(machines, "now", lambda: later):
             self.assertFalse(machines.watching())
 
+    def test_takes_a_watcher_that_watches_with_another_key_as_stopped(self):
+        os.environ["VAST_API_KEY"] = "one"
+        machines.watch_round()
+        self.assertTrue(machines.watching())
+        os.environ["VAST_API_KEY"] = "another"
+        self.assertFalse(machines.watching())
+
     def test_takes_a_watcher_that_is_gone_as_stopped(self):
         machines.watch_round()
         ended = subprocess.Popen(["true"])

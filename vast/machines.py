@@ -15,11 +15,12 @@ Machines with different GPUs are never compared. An image without python3 gets a
 nvidia-smi reports them and of the network, but not of the GPUs' speeds.
 
 A rented machine goes back when the work returns it, or else at its deadline. Each workstation runs one watcher,
-`job-runner vast watch`, which job-runner's install.sh starts as a systemd user service that starts with the workstation and comes back
-if it stops. Round after round the watcher sends back each machine rented on its workstation whose deadline has passed,
-or whose return the work asked for but Vast.ai did not complete, whatever has become of the work. rent rents nothing
-while the watcher does not run. return records that the machine is to go back before it destroys it, so that a return
-that fails is the watcher's to finish.
+`job-runner vast watch`, which job-runner's install.sh starts as a systemd user service that starts with the
+workstation and comes back if it stops. Round after round the watcher sends back each machine rented on its
+workstation whose deadline has passed, or whose return the work asked for but Vast.ai did not complete, whatever has
+become of the work. rent rents nothing while the watcher does not run with the key that rents, since a watcher sees
+the machines of its own key's account alone. return records that the machine is to go back before it destroys it, so
+that a return that fails is the watcher's to finish.
 
 rent, list, ssh-config, return and watch need the Vast.ai API key in VAST_API_KEY, which this script takes from
 job-runner's .env, one NAME=VALUE a line, unless the environment already gives it. rent and ssh-config need the caller's SSH key as
@@ -49,6 +50,7 @@ Usage:
 import argparse
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -563,15 +565,22 @@ def workstation():
     return socket.gethostname()
 
 
+def key_mark():
+    """What the watcher marks its rounds with for the Vast.ai key it watches with: a digest, which tells keys apart and
+    gives none away."""
+    return hashlib.sha256(os.environ.get("VAST_API_KEY", "").encode()).hexdigest()[:16]
+
+
 def watching():
-    """Whether this workstation's watcher runs: it is still there and finished a round within WATCH_STALE_SECONDS."""
+    """Whether this workstation's watcher watches the machines that the key rents: it is still there and finished a
+    round with the key within WATCH_STALE_SECONDS."""
     try:
         beat = json.loads((home() / "watch.json").read_text())
         os.kill(beat["pid"], 0)
         age = (now() - datetime.fromisoformat(beat["at"])).total_seconds()
     except (OSError, ValueError, KeyError, TypeError):
         return False
-    return beat.get("workstation") == workstation() and age <= WATCH_STALE_SECONDS
+    return beat.get("workstation") == workstation() and beat.get("key") == key_mark() and age <= WATCH_STALE_SECONDS
 
 
 def watch_round():
@@ -588,7 +597,7 @@ def watch_round():
                 print(stamp(), f"instance {instance} could not go back yet:", hide_addresses(str(error)), flush=True)
     path = home() / "watch.json"
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps({"workstation": here, "pid": os.getpid(), "at": stamp()}) + "\n")
+    temporary.write_text(json.dumps({"workstation": here, "pid": os.getpid(), "at": stamp(), "key": key_mark()}) + "\n")
     temporary.replace(path)
 
 
@@ -692,7 +701,8 @@ def rent(args):
     the failed ones have cost more than --failure-budget dollars in all."""
     # Before renting: a machine nothing would send back at its deadline must not be rented at all.
     if not watching():
-        raise SystemExit("rent needs this workstation's watcher, `job-runner vast watch`, which job-runner's install.sh starts")
+        raise SystemExit("rent needs this workstation's watcher, `job-runner vast watch`, to run with the key that "
+                         "rents; job-runner's install.sh starts it with the key in .env")
     # Without the caller's key every machine would fail at SSH, and the ledger would blame them.
     key, failed, spent = public_key(), 0, 0.0
     offers = [offer for offer in choose(search(args.gpu, args.count, args.disk, args.query,
