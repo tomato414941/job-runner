@@ -3,6 +3,7 @@
 import hashlib
 import importlib
 import os
+import socket
 import tempfile
 import threading
 import time
@@ -29,6 +30,15 @@ class SendTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         with mock.patch.dict(os.environ, {"JOB_RUNNER_HOME": str(Path(self.directory.name) / "home")}):
             importlib.reload(agent)
+        # What the daemon's process asks the system's own lookup, which comes back once the test is over.
+        self.looked, lookup = [], socket.getaddrinfo
+        self.addCleanup(setattr, socket, "getaddrinfo", lookup)
+
+        def looked_up(*arguments, **options):
+            self.looked.append(arguments[:2])
+            return lookup(*arguments, **options)
+
+        socket.getaddrinfo = looked_up
         self.daemon = agent.Daemon()
         self.asked, self.answer = [], lambda name, number, body: md5(body)
         test = self
@@ -139,6 +149,50 @@ class SendTests(unittest.TestCase):
 
         self.assertEqual((entry["state"], entry["error"]), ("failed", "HTTPError"))
         self.assertLess(len(self.asked), parts)
+
+    def test_looks_the_stores_address_up_once_for_all_the_parts_of_a_file(self):
+        _, upload = self.held("a.bin", 2 * agent.CONNECTIONS)
+
+        entry = self.send(upload)["a.bin"]
+
+        self.assertEqual(entry["state"], "sent")
+        self.assertEqual(self.looked.count(("127.0.0.1", self.server.server_port)), 1)
+
+
+class LookupsTests(unittest.TestCase):
+    def test_asks_for_a_names_addresses_again_once_it_has_used_them_for_lookup_seconds(self):
+        now, asked = [0.0], []
+
+        def resolve(host, port):
+            asked.append((host, port))
+            return [f"the address of {host}, as answer {len(asked)}"]
+
+        lookups = agent.Lookups(resolve, clock=lambda: now[0])
+
+        first = lookups("store", 443)
+        now[0] = agent.LOOKUP_SECONDS - 1
+        again = lookups("store", 443)
+        now[0] = agent.LOOKUP_SECONDS
+        later = lookups("store", 443)
+
+        self.assertEqual((first, again, later), (["the address of store, as answer 1"],) * 2
+                         + (["the address of store, as answer 2"],))
+        self.assertEqual(asked, [("store", 443)] * 2)
+
+    def test_asks_again_at_once_after_a_lookup_that_failed(self):
+        answers = [OSError("no answer"), ["the address"]]
+
+        def resolve(host, port):
+            answer = answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        lookups = agent.Lookups(resolve)
+
+        with self.assertRaises(OSError):
+            lookups("store", 443)
+        self.assertEqual(lookups("store", 443), ["the address"])
 
 
 if __name__ == "__main__":

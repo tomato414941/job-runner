@@ -76,6 +76,9 @@ PROGRESS, INSTALLED = HOME / "progress.json", HOME / "installed"
 PART_BYTES, CONNECTIONS = 64 * 1024 * 1024, 8
 SLOW_SECONDS, SLOW_BYTES, SLOW_RESTARTS = 60, 1024 * 1024, 5
 ATTEMPTS = 3
+# Each part goes over a connection of its own, and a machine's resolver now and then takes seconds to answer: the
+# addresses of a name are used for this long before they are asked for again.
+LOOKUP_SECONDS = 60
 # The job is started through this, so that it is sent SIGTERM when the thread that
 # started it ends, as when the daemon does; Linux keeps that across exec.
 WITH_PARENT = ("import ctypes, os, signal, sys; ctypes.CDLL(None).prctl(1, signal.SIGTERM); "
@@ -83,6 +86,22 @@ WITH_PARENT = ("import ctypes, os, signal, sys; ctypes.CDLL(None).prctl(1, signa
 
 
 # Transfers
+
+
+class Lookups:
+    """socket.getaddrinfo, each answer kept for LOOKUP_SECONDS and asked for by one thread at a time."""
+
+    def __init__(self, resolve, clock=time.monotonic):
+        self.resolve, self.clock, self.lock, self.answers = resolve, clock, threading.Lock(), {}
+
+    def __call__(self, *arguments, **options):
+        asked = (arguments, tuple(sorted(options.items())))
+        with self.lock:
+            at, found = self.answers.get(asked, (None, None))
+            if at is None or self.clock() - at >= LOOKUP_SECONDS:
+                found = self.resolve(*arguments, **options)
+                self.answers[asked] = (self.clock(), found)
+            return found
 
 
 def digests(path, start=0, length=None):
@@ -264,6 +283,8 @@ class Daemon:
         self.uploads = queue.Queue()
         for directory in (KEEP, OUTBOX, LOGS):
             directory.mkdir(parents=True, exist_ok=True)
+        # Every connection of the daemon's process is a transfer's.
+        socket.getaddrinfo = Lookups(socket.getaddrinfo)
         threading.Thread(target=self.send_loop, daemon=True).start()
 
     def save(self):
