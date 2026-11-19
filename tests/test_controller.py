@@ -125,14 +125,22 @@ class ControllerTests(unittest.TestCase):
         self.controller.install(Install("m1"))
         self.assertEqual([(event["event"], event.get("error")) for event in self.events()], [("refused", "Busy")])
 
-    def test_sends_a_file_larger_than_one_put_in_parts(self):
+    def test_sends_a_file_larger_than_one_part_in_parts(self):
         self.controller.reports["m1"] = {"outbox": [{"id": "o1", "kind": "output", "step": "first",
-                                                     "path": "out/a.pt", "bytes": 10}]}
+                                                     "path": "out/a.pt", "bytes": 7}]}
         self.controller.send(Send("m1", ("o1",)))
         upload = json.loads(self.provider.ran[-1][2])["uploads"][0]
         self.assertEqual([(part["number"], part["start"], part["length"]) for part in upload["parts"]],
-                         [(1, 0, 4), (2, 4, 4), (3, 8, 2)])
+                         [(1, 0, 4), (2, 4, 3)])
         self.assertIn(upload["upload"], self.store.uploads)
+
+    def test_sends_a_file_that_fits_in_one_part_whole(self):
+        self.controller.reports["m1"] = {"outbox": [{"id": "o1", "kind": "output", "step": "first",
+                                                     "path": "out/a.pt", "bytes": 4}]}
+        self.controller.send(Send("m1", ("o1",)))
+        upload = json.loads(self.provider.ran[-1][2])["uploads"][0]
+        self.assertEqual(sorted(upload), ["id", "url"])
+        self.assertEqual(self.store.uploads, {})
 
     def test_finishes_an_upload_in_parts_over_an_older_file_of_the_same_size_at_its_key(self):
         key = f"{PREFIX}/outputs/out/a.pt"

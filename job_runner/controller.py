@@ -235,11 +235,11 @@ class Controller:
         for id_ in action.ids:
             entry = self.entry(action.machine, id_)
             key = self.key(Record.key(entry))
-            if entry["bytes"] <= self.store.max_put:
-                uploads.append({"id": id_, "url": self.store.presign("PUT", key, seconds)})
-                continue
             # A store takes at most 10,000 parts of an upload.
             size = max(min(self.spec.policy.part_bytes, self.store.max_put), math.ceil(entry["bytes"] / 10_000))
+            if entry["bytes"] <= size:
+                uploads.append({"id": id_, "url": self.store.presign("PUT", key, seconds)})
+                continue
             upload = self.store.start_upload(key)
             uploads.append({"id": id_, "upload": upload, "parts": [
                 {"number": number, "start": start, "length": min(size, entry["bytes"] - start),

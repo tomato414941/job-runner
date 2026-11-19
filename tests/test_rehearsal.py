@@ -122,7 +122,7 @@ class RehearsalTests(unittest.TestCase):
         self.assertEqual(outcome, "complete")
         self.assert_run_complete()
         self.assertEqual(self.provider.rented, ["m1"])
-        # The checkpoints are larger than a PUT takes, and went up in parts; the run outlasted any URL.
+        # The checkpoints are larger than a part, and went up in parts; the run outlasted any URL.
         self.assertGreater(self.store.joined, 0)
         self.assertGreater(time.monotonic() - began, POLICY["url"])
         self.assertEqual(self.store.refused, [])

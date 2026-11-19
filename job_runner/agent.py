@@ -59,7 +59,7 @@ import time
 import traceback
 import uuid
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from http.client import HTTPException
 from pathlib import Path
 from urllib.error import HTTPError
@@ -70,9 +70,9 @@ HOME = Path(os.environ.get("JOB_RUNNER_HOME") or Path.home() / ".job-runner")
 CODE, KEEP, OUTBOX, LOGS = HOME / "code", HOME / "keep", HOME / "outbox", HOME / "logs"
 SOCKET, LOCK, STATE = HOME / "agent.sock", HOME / "agent.lock", HOME / "state.json"
 PROGRESS, INSTALLED = HOME / "progress.json", HOME / "installed"
-# A download arrives in parts over several connections; a connection that brings
-# less than SLOW_BYTES a second over SLOW_SECONDS asks again, as a new one usually
-# runs at full speed.
+# A download arrives in parts over several connections, and an upload's parts leave
+# over as many; a connection that brings less than SLOW_BYTES a second over
+# SLOW_SECONDS asks again, as a new one usually runs at full speed.
 PART_BYTES, CONNECTIONS = 64 * 1024 * 1024, 8
 SLOW_SECONDS, SLOW_BYTES, SLOW_RESTARTS = 60, 1024 * 1024, 5
 ATTEMPTS = 3
@@ -173,12 +173,33 @@ def put(path, url, start, length):
                     response.read()
                     return (response.headers.get("ETag") or "").strip('"')
         except HTTPError as error:
+            error.close()
             if error.code < 500 or attempt + 1 == ATTEMPTS:
                 raise
         except (OSError, HTTPException):
             if attempt + 1 == ATTEMPTS:
                 raise
         time.sleep(2**attempt)
+
+
+def put_part(path, part):
+    """Send one part of a file and return [its number, its ETag], which must name the bytes sent."""
+    expected = digests(path, part["start"], part["length"])[1]
+    etag = put(path, part["url"], part["start"], part["length"])
+    if etag != expected:
+        raise ValueError("the store received other bytes")
+    return [part["number"], etag]
+
+
+def put_parts(path, parts):
+    """Send a file's parts over several connections and return what put_part does of each, in their order; once
+    one fails, those not yet begun stay unsent."""
+    with ThreadPoolExecutor(CONNECTIONS) as pool:
+        sending = [pool.submit(put_part, path, part) for part in parts]
+        wait(sending, return_when=FIRST_EXCEPTION)
+        for part in sending:
+            part.cancel()
+        return [part.result() for part in sending]
 
 
 # The daemon
@@ -517,7 +538,8 @@ class Daemon:
                 self.send(upload, entry)
 
     def send(self, upload, entry):
-        """Upload one file, whole or in parts, checking each ETag; whatever goes wrong fails this upload alone."""
+        """Upload one file, whole or its parts several at a time, checking each ETag; whatever goes wrong fails this
+        upload alone."""
         link = OUTBOX / entry["id"]
         try:
             if "url" in upload:
@@ -525,13 +547,7 @@ class Daemon:
                 if etags[0][1] != entry["md5"]:
                     raise ValueError("the store received other bytes")
             else:
-                etags = []
-                for part in upload["parts"]:
-                    expected = digests(link, part["start"], part["length"])[1]
-                    etag = put(link, part["url"], part["start"], part["length"])
-                    if etag != expected:
-                        raise ValueError("the store received other bytes")
-                    etags.append([part["number"], etag])
+                etags = put_parts(link, upload["parts"])
             changes = {"state": "sent", "upload": upload.get("upload"), "etags": etags}
         except Exception as error:  # The sender serves on; the controller sends the file again.
             if not isinstance(error, (OSError, ValueError, HTTPException)):

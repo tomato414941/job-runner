@@ -55,7 +55,9 @@ class Policy:
     send: float = 3 * HOUR
     send_attempts: int = 5
     handover: float = 30 * 60.0
-    part_bytes: int = 1 << 30
+    # A file larger than this goes to the store in parts of this size, which its machine sends several at a time;
+    # R2 takes no part smaller than 5 MiB but a file's last.
+    part_bytes: int = 64 * 1024 * 1024
     # A job that stops by itself starts again this many times on one machine, and then the run fails.
     restarts: int = 2
     # The run fails when a step fails this many times on machines that pass their check, the install fails
