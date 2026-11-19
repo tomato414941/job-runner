@@ -559,9 +559,9 @@ class Daemon:
                 self.send(upload, entry)
 
     def send(self, upload, entry):
-        """Upload one file, whole or its parts several at a time, checking each ETag; whatever goes wrong fails this
-        upload alone."""
-        link = OUTBOX / entry["id"]
+        """Upload one file, whole or its parts several at a time, checking each ETag, and note how long that took;
+        whatever goes wrong fails this upload alone."""
+        link, began = OUTBOX / entry["id"], time.monotonic()
         try:
             if "url" in upload:
                 etags = [[0, put(link, upload["url"], 0, entry["bytes"])]]
@@ -569,7 +569,8 @@ class Daemon:
                     raise ValueError("the store received other bytes")
             else:
                 etags = put_parts(link, upload["parts"])
-            changes = {"state": "sent", "upload": upload.get("upload"), "etags": etags}
+            changes = {"state": "sent", "upload": upload.get("upload"), "etags": etags,
+                       "seconds": round(time.monotonic() - began, 1)}
         except Exception as error:  # The sender serves on; the controller sends the file again.
             if not isinstance(error, (OSError, ValueError, HTTPException)):
                 traceback.print_exc()

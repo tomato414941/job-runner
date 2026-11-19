@@ -160,6 +160,19 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.controller.record.finished(self.controller.spec), ["first"])
         self.assertEqual(self.controller.facts, [])
 
+    def test_tells_with_a_file_it_keeps_how_long_the_machine_took_to_send_it(self):
+        key = f"{PREFIX}/outputs/out/a.pt"
+        self.store.write(key, b"ten bytes!")
+        self.controller.reports["m1"] = {"outbox": [{
+            "id": "o1", "kind": "output", "step": "first", "path": "out/a.pt", "bytes": 10, "sha256": "s",
+            "state": "sent", "upload": None, "etags": [[0, hashlib.md5(b"ten bytes!").hexdigest()]],
+            "outputs": ["out/a.pt"], "at": 1.0, "seconds": 2.5}]}
+
+        self.controller.keep(Keep("m1", ("o1",)))
+
+        self.assertEqual([(event["path"], event["bytes"], event["seconds"])
+                          for event in self.events() if event["event"] == "kept"], [("out/a.pt", 10, 2.5)])
+
     def test_does_not_record_a_file_the_store_does_not_hold(self):
         self.controller.reports["m1"] = {"outbox": [{
             "id": "o1", "kind": "output", "step": "first", "path": "out/a.pt", "bytes": 10, "sha256": "s",

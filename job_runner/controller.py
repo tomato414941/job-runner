@@ -275,8 +275,9 @@ class Controller:
             # A copy beside the memory, for `job-runner status`; the store's is the truth.
             (self.directory / "record.json").write_bytes(written)
             for entry in kept:
+                # The seconds the machine took to send the file, which the ticks between its events do not tell.
                 self.event("kept", machine=action.machine, kind=entry["kind"], step=entry["step"],
-                           path=entry["path"], bytes=entry["bytes"])
+                           path=entry["path"], bytes=entry["bytes"], seconds=entry.get("seconds"))
             self.ask(action.machine, "forget", {"ids": [entry["id"] for entry in kept]})
 
     def stop(self, action):

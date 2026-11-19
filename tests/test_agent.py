@@ -158,6 +158,19 @@ class SendTests(unittest.TestCase):
         self.assertEqual(entry["state"], "sent")
         self.assertEqual(self.looked.count(("127.0.0.1", self.server.server_port)), 1)
 
+    def test_tells_how_long_a_file_took_to_send(self):
+        _, upload = self.held("a.bin", 2)
+
+        def answer(name, number, body):
+            time.sleep(0.3)
+            return md5(body)
+
+        self.answer = answer
+
+        entry = self.send(upload)["a.bin"]
+
+        self.assertGreaterEqual(entry["seconds"], 0.3)
+
 
 class LookupsTests(unittest.TestCase):
     def test_asks_for_a_names_addresses_again_once_it_has_used_them_for_lookup_seconds(self):
