@@ -317,10 +317,12 @@ class DecideTests(unittest.TestCase):
         self.assertEqual(actions, [Release("m2", "failed", False)])
         self.assertEqual(memory.detail, "the install failed on 2 machines and passed on none")
 
-    def test_rejects_a_machine_whose_install_takes_too_long(self):
+    def test_sends_back_unrejected_a_machine_whose_install_takes_too_long_and_rents_it_no_more(self):
         memory = working(state="installing", since=NOW - POLICY.install - 1)
-        actions, _ = self.decide({"m1": seen("installing")}, memory)
-        self.assertEqual(actions, [Release("m1", "its install took too long", True), Rent()])
+        actions, memory = self.decide({"m1": seen("installing")}, memory)
+        self.assertEqual(actions, [Release("m1", "its install took too long", False), Rent(("m1",))])
+        actions, _ = self.decide({}, memory)
+        self.assertEqual(actions, [Rent(("m1",))])
 
     def test_waits_while_no_offer_fits(self):
         actions, memory = self.decide({}, facts=[NoOffer()])

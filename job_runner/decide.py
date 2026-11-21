@@ -20,8 +20,10 @@ machine's deadline moves on while less than policy.renew of it is left.
 
 A machine is rejected, so that the provider never rents it again, only for what
 sets it apart from the work: it stops answering, runs well below the rate its
-step went at elsewhere, takes too long to install, fails the check after it
-passed it, or fails the install that another machine of the run passed. When a
+step went at elsewhere, fails the check after it passed it, or fails the install
+that another machine of the run passed. A machine whose install takes longer
+than policy.install goes back unrejected, since a network that is slow for a
+while is no lasting fault of the machine, and this run rents it no more. When a
 step fails, its agent runs the check: a machine that fails it now is what broke,
 and the step carries on elsewhere as if it had not failed; on a machine that
 passes it, the step runs again, and the run fails once it has failed
@@ -207,6 +209,8 @@ class Memory:
     # Whether a machine passed the install; until one does, id -> why for those that failed it.
     installed: bool = False
     suspects: dict = field(default_factory=dict)
+    # Machines this run rents no more, though they are not rejected: id -> why.
+    avoided: dict = field(default_factory=dict)
     rent_failures: int = 0
     waiting_since: float | None = None
     # Why the run was asked to stop.
@@ -301,7 +305,7 @@ class Decision:
             if not memory.machines:
                 self.end("stopped", memory.stopping)
         elif not memory.machines:
-            self.actions.append(Rent(tuple(memory.suspects)))
+            self.actions.append(Rent((*memory.suspects, *memory.avoided)))
 
     def end(self, outcome, detail):
         """Give the run its outcome and release its machines; it is over once they are gone."""
@@ -364,7 +368,8 @@ class Decision:
             if machine.state != "installing":
                 self.to(machine, "installing")
             elif self.now - machine.since > self.policy.install:
-                self.release(ident, "its install took too long", True)
+                self.memory.avoided[ident] = "its install took too long"
+                self.release(ident, "its install took too long", False)
                 return
             if phase == "empty":
                 # A machine without the job, or an agent that started over before its install was done.

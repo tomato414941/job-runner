@@ -40,7 +40,7 @@ class Policy:
     url: float = 6 * HOUR
     unreachable: float = 15 * 60.0
     # The most a machine's install may take, and the check after a step failed on it.
-    install: float = 60 * 60.0
+    install: float = 15 * 60.0
     # A step goes slow below slow_ratio of its rate for `slow`, from `warmup` after it
     # started, which leaves the job its own start, as compiling; its machine is replaced
     # when that saves more than `replace`.
