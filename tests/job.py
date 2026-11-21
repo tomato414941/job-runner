@@ -5,7 +5,10 @@ saves its checkpoint every few steps and keeps it, takes up from its own
 checkpoint when run again, saves and keeps on SIGTERM, and can fail at a step.
 evaluate writes the step of the checkpoint it reads, unless it already has.
 check passes on a machine whose GPU works; train fails on one whose GPU is lost,
-which a rehearsal marks with the file `broken` in the machine's HOME.
+which a rehearsal marks with the file `broken` in the machine's HOME. On a machine
+with the file `held` there, train goes no further than the first checkpoint it
+keeps, so that a rehearsal acts on the machine while the step surely runs: the
+job ends there only when its machine dies, loses its GPU or tells it to stop.
 """
 
 import argparse
@@ -31,6 +34,10 @@ def keep(path):
 
 def gpu_lost():
     return (Path.home() / "broken").exists()
+
+
+def held():
+    return (Path.home() / "held").exists()
 
 
 def progress(done, total):
@@ -80,6 +87,10 @@ def train(args):
             save(checkpoint, step, args.checkpoint_bytes)
             if step < args.steps:
                 keep(checkpoint)
+                while held() and not stopping:
+                    if gpu_lost():
+                        sys.exit("no CUDA GPUs are available")
+                    time.sleep(SECONDS_PER_STEP)
 
 
 def setup(_args):

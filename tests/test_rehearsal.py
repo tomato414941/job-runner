@@ -93,6 +93,15 @@ class RehearsalTests(unittest.TestCase):
         however long the commands of the ticks before take."""
         self.spec["steps"][0] = train("first", 300, "--data", "data/corpus.bin", inputs=["data/corpus.bin"])
 
+    def hold_the_first_machine(self):
+        """Rent first a machine whose job holds still once it has kept its first checkpoint, at step 10, so that what a
+        test does to it after that checkpoint is kept happens while the step runs, however slow this machine is; the
+        machine rented next carries the run to its end. A job held still is no slow machine, which the run would hand
+        over before the test acts, so the run bears with it."""
+        self.offers[:] = [{"price": 0.4, "speed": 1.0, "count": 1, "held": True},
+                          {"price": 0.5, "speed": 1.0, "count": 1}]
+        self.spec["policy"].update(slow=600.0)
+
     def job_log(self, machine, step):
         return self.root / "machines" / machine / ".job-runner/logs" / f"{step}.log"
 
@@ -135,7 +144,7 @@ class RehearsalTests(unittest.TestCase):
                 self.provider.kill("m1")
             return False
 
-        self.lengthen_first()
+        self.hold_the_first_machine()
         outcome = self.carry(self.controller(), until=kill_once_a_checkpoint_is_kept)
 
         self.assertEqual(outcome, "complete")
@@ -143,7 +152,7 @@ class RehearsalTests(unittest.TestCase):
         self.assertEqual(self.provider.rented, ["m1", "m2"])
         self.assertEqual(self.provider.rejected, [("m1", "it stopped answering")])
         start = json.loads(self.job_log("m2", "first").read_text().splitlines()[0])
-        self.assertGreaterEqual(start["resumed_from"], 10)
+        self.assertEqual(start["resumed_from"], 10)
 
     def test_hands_over_from_a_slow_machine_once_its_checkpoint_is_kept(self):
         self.offers[:] = [{"price": 0.4, "speed": 0.25, "count": 1}, {"price": 0.5, "speed": 1.0, "count": 1}]
@@ -179,7 +188,7 @@ class RehearsalTests(unittest.TestCase):
                 self.provider.lose_gpu("m1")
             return False
 
-        self.lengthen_first()
+        self.hold_the_first_machine()
         outcome = self.carry(self.controller(), until=lose_the_gpu_once_a_checkpoint_is_kept)
 
         self.assertEqual(outcome, "complete")
@@ -188,7 +197,7 @@ class RehearsalTests(unittest.TestCase):
         self.assertEqual(machine, "m1")
         self.assertRegex(reason, r"^it failed its check after first failed: python3 job\.py check ended with 1")
         start = json.loads(self.job_log("m2", "first").read_text().splitlines()[0])
-        self.assertGreaterEqual(start["resumed_from"], 10)
+        self.assertEqual(start["resumed_from"], 10)
 
     def test_rents_another_machine_when_the_install_fails_and_rejects_the_first_once_the_other_passes_it(self):
         self.offers[:] = [{"price": 0.4, "speed": 1.0, "count": 1, "broken": True},

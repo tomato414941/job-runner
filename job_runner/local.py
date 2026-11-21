@@ -151,9 +151,10 @@ class LocalStore:
 
 
 class LocalProvider:
-    """Machines that are directories here. An offer is {"price", "speed", "count", "broken"}: dollars an hour, a
-    speed the machine's processes see as JOB_RUNNER_SPEED, how many machines it has, and whether their GPU is lost, which
-    the file `broken` in a machine's HOME tells its processes."""
+    """Machines that are directories here. An offer is {"price", "speed", "count", "broken", "held"}: dollars an hour, a
+    speed the machine's processes see as JOB_RUNNER_SPEED, how many machines it has, whether their GPU is lost, which
+    the file `broken` in a machine's HOME tells its processes, and whether their job holds still once it has kept a
+    checkpoint, which the file `held` tells them."""
 
     def __init__(self, directory, offers, uv):
         self.directory, self.offers, self.uv = Path(directory), offers, uv
@@ -175,6 +176,8 @@ class LocalProvider:
             (home / ".job-runner/uv/uv").symlink_to(self.uv)
             if offer.get("broken"):
                 (home / "broken").touch()
+            if offer.get("held"):
+                (home / "held").touch()
             self.machines_[ident] = {"home": home, "label": label, "price": offer["price"], "speed": offer["speed"],
                                      "since": time.time(), "deadline": time.time() + hours * 3600, "answers": True}
             self.rented.append(ident)
