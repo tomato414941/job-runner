@@ -33,7 +33,8 @@ by itself starts again, and the run fails when it stops more than
 policy.restarts times on one machine.
 
 The run ends complete once the store keeps every step's outputs; failed as
-above, or when renting or an upload keeps failing; over budget once it has cost
+above, when renting or an upload keeps failing, or when no offer has fit for
+policy.wait; over budget once it has cost
 policy.budget; stopped when asked to, once its machines have handed over what
 they hold. Ending releases every machine, and the run is over once the provider
 lists none.
@@ -272,6 +273,9 @@ class Decision:
         for fact in facts:
             if isinstance(fact, NoOffer):
                 memory.waiting_since = memory.waiting_since or self.now
+                waited = self.now - memory.waiting_since
+                if self.policy.wait is not None and waited >= self.policy.wait:
+                    self.end("failed", f"no offer fit for {waited / 3600:.1f} hours")
             elif isinstance(fact, RentFailed):
                 memory.rent_failures += 1
                 if memory.rent_failures >= self.policy.rent_failures:

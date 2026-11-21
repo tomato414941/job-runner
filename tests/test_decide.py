@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 
 from job_runner.decide import (
     End, Extend, Install, Keep, KeepFailed, Leaving, Machine, Memory, NoOffer, Reject, Release, Released, Rent,
@@ -324,6 +325,15 @@ class DecideTests(unittest.TestCase):
     def test_waits_while_no_offer_fits(self):
         actions, memory = self.decide({}, facts=[NoOffer()])
         self.assertEqual((actions, memory.waiting_since), ([Rent()], NOW))
+        actions, memory = self.decide({}, Memory(waiting_since=NOW - 100 * 3600), facts=[NoOffer()])
+        self.assertEqual((actions, memory.waiting_since), ([Rent()], NOW - 100 * 3600))
+
+    def test_ends_the_run_failed_once_no_offer_has_fit_for_as_long_as_its_policy_waits(self):
+        spec = replace(SPEC, policy=replace(POLICY, wait=3600.0))
+        actions, _ = self.decide({}, Memory(waiting_since=NOW - 3599), facts=[NoOffer()], spec=spec)
+        self.assertEqual(actions, [Rent()])
+        actions, _ = self.decide({}, Memory(waiting_since=NOW - 3600), facts=[NoOffer()], spec=spec)
+        self.assertEqual(actions, [End("failed", "no offer fit for 1.0 hours")])
 
     def test_ends_the_run_failed_when_renting_keeps_failing_otherwise_than_for_want_of_an_offer(self):
         actions, memory = self.decide({}, facts=[RentFailed("the image did not start")])

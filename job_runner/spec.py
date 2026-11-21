@@ -66,6 +66,8 @@ class Policy:
     step_failures: int = 2
     install_failures: int = 2
     rent_failures: int = 2
+    # The run fails once it has had no machine and found no offer that fits for this long; None waits on.
+    wait: float | None = None
     budget: float | None = None
 
 
