@@ -31,6 +31,22 @@ class Cloud:
         self.servers, self.keys, self.requests, self.next, self.currency = {}, {}, [], 1, "USD"
         # How many of the next listings of keys miss a key that is there, as when another run adds it meanwhile.
         self.late = 0
+        # Each server type's hourly price in each location, and whether it lists the type as one it can create there.
+        self.types = {"cpx51": {"hel1": ("0.0500", True), "fsn1": ("0.0600", True)},
+                      "cx43": {"hel1": ("0.0300", False), "fsn1": ("0.0300", True), "nbg1": ("0.0300", True)},
+                      "forbidden": {"hel1": ("0.0100", True)}}
+        # Where a type it lists has no room after all; how many servers the project may hold; how many types a page.
+        self.full, self.limit, self.page = set(), None, 50
+
+    def type_page(self, number):
+        names = list(self.types)
+        page = [{"name": name, "prices": [{"location": place, "price_hourly": {"gross": price}}
+                                          for place, (price, _) in self.types[name].items()],
+                 "locations": [{"name": place, "available": available}
+                               for place, (_, available) in self.types[name].items()]}
+                for name in names[(number - 1) * self.page:number * self.page]]
+        more = number * self.page < len(names)
+        return {"server_types": page, "meta": {"pagination": {"next_page": number + 1 if more else None}}}
 
     def key(self, body):
         digest = hashlib.md5(base64.b64decode(body["public_key"].split()[1])).hexdigest()
@@ -41,11 +57,12 @@ class Cloud:
 
     def server(self, body):
         location = body["location"]
+        price = self.types[body["server_type"]][location][0]
         server = {"id": self.next, "name": body["name"], "status": "running", "labels": body["labels"],
                   "created": datetime.now(UTC).isoformat(), "public_net": {"ipv4": {"ip": "127.0.0.1"}},
                   "location": {"name": location},
                   "server_type": {"name": body["server_type"],
-                                  "prices": [{"location": location, "price_hourly": {"gross": "0.0500"}}]}}
+                                  "prices": [{"location": location, "price_hourly": {"gross": price}}]}}
         self.servers[self.next] = server
         self.next += 1
         return server
@@ -73,11 +90,15 @@ def handler(cloud):
             cloud.requests.append((self.command, parts.path, body))
             ident = int(parts.path.rsplit("/", 1)[1]) if parts.path.count("/") == 2 else None
             if self.command == "POST" and parts.path == "/servers":
-                if body["server_type"] == "scarce":
+                if (body["server_type"], body["location"]) in cloud.full:
                     return self.answer(412, {"error": {"code": "resource_unavailable"}})
                 if body["server_type"] == "forbidden":
                     return self.answer(403, {"error": {"code": "forbidden"}})
+                if cloud.limit is not None and len(cloud.servers) >= cloud.limit:
+                    return self.answer(403, {"error": {"code": "resource_limit_exceeded"}})
                 return self.answer(201, {"server": cloud.server(body)})
+            if self.command == "GET" and parts.path == "/server_types":
+                return self.answer(200, cloud.type_page(int(parse_qs(parts.query).get("page", ["1"])[0])))
             if self.command == "GET" and parts.path == "/pricing":
                 return self.answer(200, {"pricing": {"currency": cloud.currency}})
             if self.command == "GET" and parts.path == "/ssh_keys":
@@ -144,14 +165,58 @@ class HetznerProviderTests(unittest.TestCase):
         with patch.object(HetznerProvider, "answers", return_value=True):
             return self.provider.rent("run", needs or self.needs, hours)
 
+    def created(self):
+        """The bodies of the servers asked for."""
+        return [body for method, path, body in self.cloud.requests if (method, path) == ("POST", "/servers")]
+
     def test_rents_a_server_labelled_with_its_run_and_deadline_or_none_when_there_is_no_room(self):
         self.assertEqual(self.rent(), ("1", 0.0))
-        body = next(body for method, path, body in self.cloud.requests if (method, path) == ("POST", "/servers"))
+        (body,) = self.created()
         self.assertEqual(body["labels"][LABEL], "run")
         self.assertAlmostEqual(int(body["labels"][DEADLINE]), time.time() + 7200, delta=60)
-        self.assertEqual(self.rent({**self.needs, "server_type": "scarce"}), (None, 0.0))
+        self.assertEqual((body["server_type"], body["location"]), ("cpx51", "hel1"))
+        # Hetzner lists the type as one it cannot create there, or has no room for it after all.
+        self.assertEqual(self.rent({**self.needs, "server_type": "cx43"}), (None, 0.0))
+        self.assertEqual(len(self.created()), 1)
+        self.cloud.full.add(("cpx51", "hel1"))
+        self.assertEqual(self.rent(), (None, 0.0))
         with self.assertRaisesRegex(RentError, "forbidden"):
             self.rent({**self.needs, "server_type": "forbidden"})
+
+    def test_rents_the_cheapest_server_it_can_create_now_of_the_types_and_in_the_locations_the_run_takes(self):
+        needs = {**self.needs, "server_type": ["cpx51", "cx43"], "location": ["hel1", "fsn1"]}
+        self.assertEqual(self.provider.offers(needs), [
+            {"server_type": "cx43", "location": "fsn1", "price": 0.03},
+            {"server_type": "cpx51", "location": "hel1", "price": 0.05},
+            {"server_type": "cpx51", "location": "fsn1", "price": 0.06}])
+        # At one price, the location the run names first; without a location, any.
+        self.assertEqual([(offer["location"], offer["price"]) for offer in self.provider.offers(
+            {**needs, "server_type": "cx43", "location": ["nbg1", "fsn1"]})], [("nbg1", 0.03), ("fsn1", 0.03)])
+        self.assertEqual([offer["location"] for offer in self.provider.offers({**needs, "location": None})],
+                         ["fsn1", "nbg1", "hel1", "fsn1"])
+        # Each page of Hetzner's list of types.
+        self.cloud.page = 1
+        self.assertEqual(len(self.provider.offers(needs)), 3)
+        # The next when Hetzner has no room for one after all.
+        self.cloud.full.add(("cx43", "fsn1"))
+        self.rent(needs)
+        self.assertEqual([(body["server_type"], body["location"]) for body in self.created()],
+                         [("cx43", "fsn1"), ("cpx51", "hel1")])
+        self.assertEqual(self.provider.machines("run")[0]["cost"], 0.05)
+
+    def test_gives_each_server_an_ipv4_address_and_no_ipv6_one(self):
+        self.rent()
+        self.assertEqual(self.created()[0]["public_net"], {"enable_ipv4": True, "enable_ipv6": False})
+
+    def test_waits_under_the_projects_limits_while_a_server_of_job_runners_is_there_and_fails_with_none(self):
+        self.cloud.limit = 1
+        self.rent()
+        self.assertEqual(self.rent(), (None, 0.0))
+        self.provider.release("1")
+        # A server the project holds besides job-runner's, which no deadline sends back.
+        self.cloud.servers[99] = {"id": 99, "labels": {}}
+        with self.assertRaisesRegex(RentError, "limits"):
+            self.rent()
 
     def test_gives_each_server_the_public_half_of_its_key_which_it_adds_to_the_project_once(self):
         self.rent()

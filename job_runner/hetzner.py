@@ -1,7 +1,14 @@
 """Servers from Hetzner Cloud, rented by the hour for a run and deleted when it is done.
 
 The spec's provider says what to rent:
-  {"kind": "hetzner", "server_type": "cpx51", "location": "hel1", "image": "ubuntu-24.04"}
+  {"kind": "hetzner", "server_type": ["cpx42", "cx43"], "location": ["hel1", "fsn1"], "image": "ubuntu-24.04"}
+server_type and location each name one, or a list of those the run takes; a run without a location
+takes any. rent creates the cheapest server of those types in those locations that Hetzner says it
+can create now, the earlier in the lists first at one price, and tries the next when Hetzner has no
+room for it after all. A server has an IPv4 address and no IPv6 one, so that it takes one of the
+project's primary IPs. Hetzner refuses a server that would take the project past its limits; while
+servers that job-runner rented are in the project, that is a want of an offer, as they go at their
+deadlines, and with none there the server would never fit, so renting fails.
 HCLOUD_TOKEN is the API token of the Hetzner Cloud project to rent in, and HETZNER_SSH_KEY_FILE
 the private key whose public half each server is given; rent adds that half to the project's
 keys when it is not among them. Each server carries the run's label and its deadline as labels,
@@ -33,9 +40,16 @@ API = "https://api.hetzner.cloud/v1"
 LABEL, DEADLINE = "job-runner", "job-runner-deadline"
 # Hetzner's answers when the server type has no room in the location, which is a want of an offer.
 UNAVAILABLE = {"resource_unavailable", "placement_error"}
+# Its answer when the server would take the project past its limits, as on servers, cores or primary IPs.
+LIMITED = "resource_limit_exceeded"
 # A new server answers ssh within a minute or two; one that has not by then goes back.
 START_SECONDS = 600
 SSH_FAILED = 255
+
+
+def names(value):
+    """One name, or a list of them, as a list."""
+    return [value] if isinstance(value, str) else list(value)
 
 
 class HetznerProvider:
@@ -64,24 +78,59 @@ class HetznerProvider:
         except OSError:
             return False
 
+    def offers(self, needs):
+        """What rent would try now, in its order: [{"server_type", "location", "price"}], at dollars an hour."""
+        types = names(needs["server_type"])
+        places = names(needs["location"]) if needs.get("location") else None
+        found, page = [], 1
+        while page:
+            answer = self.request("GET", f"/server_types?per_page=50&page={page}")
+            for kind in answer["server_types"]:
+                if kind["name"] not in types:
+                    continue
+                prices = {price["location"]: float(price["price_hourly"]["gross"]) for price in kind["prices"]}
+                for place in kind.get("locations", []):
+                    name = place["name"]
+                    if place.get("available") and name in prices and (places is None or name in places):
+                        found.append({"server_type": kind["name"], "location": name, "price": prices[name]})
+            page = answer.get("meta", {}).get("pagination", {}).get("next_page")
+        return sorted(found, key=lambda offer: (offer["price"], types.index(offer["server_type"]),
+                                                places.index(offer["location"]) if places else 0))
+
     def rent(self, label, needs, hours, avoid=()):
         if not watching("hetzner", self.environment["HCLOUD_TOKEN"]):
             raise RentError(needed("hetzner"))
         public = subprocess.run(["ssh-keygen", "-y", "-f", self.environment["HETZNER_SSH_KEY_FILE"]],
                                 capture_output=True, text=True, check=True, env=self.environment).stdout.strip()
         deadline = int(time.time() + hours * 3600)
-        body = {"name": f"{label}-{deadline}"[-63:].lstrip("-"), "server_type": needs["server_type"],
-                "image": needs["image"], "location": needs["location"],
-                "labels": {LABEL: label, DEADLINE: str(deadline)}, "start_after_create": True}
+        body = {"name": f"{label}-{deadline}"[-63:].lstrip("-"), "image": needs["image"],
+                "labels": {LABEL: label, DEADLINE: str(deadline)}, "start_after_create": True,
+                "public_net": {"enable_ipv4": True, "enable_ipv6": False}}
         try:
             if self.request("GET", "/pricing")["pricing"]["currency"] != "USD":
                 raise RentError("job-runner counts costs in dollars, and Hetzner bills this account in another currency")
-            server = self.request("POST", "/servers", {**body, "ssh_keys": [self.key(public)]})["server"]
+            server, limited, offers = None, False, self.offers(needs)
+            if offers:
+                body["ssh_keys"] = [self.key(public)]
+            for offer in offers:
+                body.update(server_type=offer["server_type"], location=offer["location"])
+                try:
+                    server = self.request("POST", "/servers", body)["server"]
+                    break
+                except urllib.error.HTTPError as error:
+                    code = json.loads(error.read() or b"{}").get("error", {}).get("code")
+                    if code == LIMITED:
+                        limited = True
+                    elif code not in UNAVAILABLE:
+                        raise RentError(f"Hetzner refused the server: {code or error.code}") from None
+            if server is None:
+                if limited and not self.servers(LABEL):
+                    raise RentError("the server would take the project past its limits, "
+                                    "and the project holds no server of job-runner's that would make room")
+                return None, 0.0
         except urllib.error.HTTPError as error:
             code = json.loads(error.read() or b"{}").get("error", {}).get("code")
-            if code in UNAVAILABLE:
-                return None, 0.0
-            raise RentError(f"Hetzner refused the server: {code or error.code}") from None
+            raise RentError(f"Hetzner refused a request: {code or error.code}") from None
         except (urllib.error.URLError, OSError) as error:
             raise RentError(f"Hetzner did not answer: {type(error).__name__}") from None
         ident = str(server["id"])
