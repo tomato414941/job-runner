@@ -1,6 +1,9 @@
 """Carry a run on rented machines to its end, and see how it goes.
 
   job-runner check DIRECTORY    what would keep the run whose spec.json is in DIRECTORY from starting now
+  job-runner offers DIRECTORY   what renting would try for the run now, in its order, each with its price in
+                                dollars an hour; exit 1 when nothing fits now, which the run waits out, and 2
+                                when the provider does not tell
   job-runner run DIRECTORY      carry the run to its end
   job-runner status DIRECTORY   what the run has finished, what its machines do, and what it has cost
   job-runner wait DIRECTORY     wait until the run is over; exit 0 when it is complete
@@ -28,7 +31,7 @@ would expire before a URL it gives, so it runs best as a service that starts
 it again with new keys:
   systemd-run --user --unit job-runner-NAME -p Restart=on-failure -p RestartSec=60 -- KEYS job-runner run DIRECTORY
 where KEYS is the command that gives it its keys. check needs the same keys and
-changes nothing; status and wait read the directory alone. stop writes the
+changes nothing; offers needs the provider's key alone; status and wait read the directory alone. stop writes the
 request, which the controller carrying the run takes up at its next look; a new
 run with the same spec carries on from what the store keeps.
 """
@@ -42,6 +45,7 @@ from pathlib import Path
 
 from .controller import STOP, Controller
 from .decide import Memory
+from .provider import RentError
 from .record import Record
 from .spec import Spec
 
@@ -49,23 +53,31 @@ from .spec import Spec
 AGAIN = 75
 
 
+def provider(spec):
+    """The provider the spec names."""
+    kind = spec.provider.get("kind")
+    if kind == "hetzner":
+        from .hetzner import HetznerProvider
+
+        return HetznerProvider()
+    if kind == "runpod":
+        from .runpod import RunPodProvider
+
+        return RunPodProvider()
+    if kind == "vast":
+        from .vast import VastProvider
+
+        return VastProvider()
+    raise SystemExit("run knows the providers vast, hetzner and runpod and the store r2")
+
+
 def outside(spec):
     """The provider and the store the spec names."""
-    if spec.provider.get("kind") not in ("vast", "hetzner", "runpod") or spec.store.get("kind") != "r2":
+    if spec.store.get("kind") != "r2":
         raise SystemExit("run knows the providers vast, hetzner and runpod and the store r2")
     from .r2 import R2Store
 
-    if spec.provider["kind"] == "hetzner":
-        from .hetzner import HetznerProvider
-
-        return HetznerProvider(), R2Store(spec.store["bucket"])
-    if spec.provider["kind"] == "runpod":
-        from .runpod import RunPodProvider
-
-        return RunPodProvider(), R2Store(spec.store["bucket"])
-    from .vast import VastProvider
-
-    return VastProvider(), R2Store(spec.store["bucket"])
+    return provider(spec), R2Store(spec.store["bucket"])
 
 
 def controller(directory):
@@ -82,6 +94,22 @@ def check(args):
     for problem in problems:
         print(problem)
     return 1 if problems else 0
+
+
+def offers(args):
+    spec = Spec.load(args.directory / "spec.json")
+    renting = provider(spec)
+    if not hasattr(renting, "offers"):
+        print(f"{spec.provider['kind']} does not tell what it would rent", file=sys.stderr)
+        return 2
+    try:
+        found = renting.offers(spec.provider)
+    except (RentError, OSError) as error:
+        print(f"the provider did not tell its offers: {error}", file=sys.stderr)
+        return 2
+    for offer in found:
+        print(json.dumps(offer, ensure_ascii=False))
+    return 0 if found else 1
 
 
 def run(args):
@@ -154,7 +182,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="job-runner", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(required=True)
-    for name, function in (("check", check), ("run", run), ("status", status), ("wait", wait), ("stop", stop)):
+    for name, function in (("check", check), ("offers", offers), ("run", run), ("status", status), ("wait", wait),
+                           ("stop", stop)):
         command = commands.add_parser(name)
         command.add_argument("directory", type=Path)
         command.set_defaults(function=function)

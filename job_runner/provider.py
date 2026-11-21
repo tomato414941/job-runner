@@ -12,6 +12,8 @@ A provider:
   extend(id, hours)                 move its deadline to hours from now: the new deadline, or None when it could not
   reject(id, reason)                rent the machine never again, released or not
   release(id)                       send the machine back: what it cost, or None when the provider does not say
+  offers(needs)                     what rent would try now, in its order: [{..., "price"}], at dollars an hour;
+                                    a provider that cannot tell lacks it
 
 A store:
   max_put                           the most bytes one PUT takes

@@ -83,6 +83,24 @@ class CommandLineTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "holds no run"):
             main(["stop", str(self.root / "elsewhere")])
 
+    def test_tells_what_renting_would_try_for_the_run_now_and_by_its_exit_code_whether_anything_fits(self):
+        class Provider:
+            def __init__(self, found):
+                self.found, self.needs = found, []
+
+            def offers(self, needs):
+                self.needs.append(needs)
+                return self.found
+
+        renting = Provider([{"server_type": "cx43", "location": "fsn1", "price": 0.03}])
+        with patch("job_runner.cli.provider", return_value=renting):
+            self.assertEqual(self.command("offers"), (0, renting.found))
+        self.assertEqual(renting.needs, [{"kind": "vast"}])
+        with patch("job_runner.cli.provider", return_value=Provider([])):
+            self.assertEqual(self.command("offers"), (1, []))
+        with patch("job_runner.cli.provider", return_value=object()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.command("offers"), (2, []))
+
     def test_says_by_its_exit_code_whether_the_run_completed(self):
         self.remember(Memory(outcome="failed", detail="first failed on 2 machines", ended=True))
         self.assertEqual(self.command("wait")[0], 1)

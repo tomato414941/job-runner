@@ -41,6 +41,16 @@ class VastProvider:
         answers = [json.loads(line) for line in ran.stdout.splitlines() if line.startswith("{")]
         return ran.returncode, answers, (ran.stderr.strip().splitlines() or [""])[-1]
 
+    def offers(self, needs):
+        arguments = ["offers", needs["gpu"], "--disk", str(needs["disk"]), "--max-price", str(needs["max_price"]),
+                     "--show", "10"]
+        if needs.get("query"):
+            arguments += ["--query", json.dumps(needs["query"])]
+        code, answers, complaint = self.script(*arguments, timeout=300)
+        if code:
+            raise RentError(complaint or f"offers ended with {code}")
+        return answers
+
     def rent(self, label, needs, hours, avoid=()):
         arguments = ["rent", needs["gpu"], "--image", needs["image"], "--label", label, "--hours", f"{hours:g}",
                      "--disk", str(needs["disk"]), "--max-price", str(needs["max_price"]),

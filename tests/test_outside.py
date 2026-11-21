@@ -141,7 +141,10 @@ if command == "rent" and label == "scarce":
     sys.exit(print(json.dumps({"rented": None, "offers": 0, "failed": 0, "failed_dollars": 0.0})) or 1)
 if command == "list" and label == "unlisted":
     sys.exit(1)
+if command == "offers" and sys.argv[2] == "H100":
+    sys.exit(print("Vast.ai did not answer", file=sys.stderr) or 1)
 answers = {
+    "offers": [{"offer": 7, "price": 0.41, "where": "Japan"}, {"offer": 8, "price": 0.5, "where": "Norway"}],
     "rent": [{"rented": 42, "ssh_config": "/tmp/42.config", "failed": 1, "failed_dollars": 0.07}],
     "list": [{"instance": 42, "label": label, "status": "running", "deadline": "2026-11-07T06:00:00+00:00",
               "hours": 1.0, "dollars": 0.5}],
@@ -185,6 +188,14 @@ sys.exit(3 if command == "fails" else 0)
         self.provider.rent("run", needs, 6, avoid=("7", "9"))
         rent = self.called()[-1]
         self.assertEqual(rent[rent.index("--avoid") + 1], "7,9")
+
+    def test_tells_the_offers_rent_would_try_through_the_machines_script(self):
+        needs = {"gpu": "RTX 5090", "image": "image", "disk": 200, "max_price": 0.64, "query": {"a": 1}}
+        self.assertEqual([offer["offer"] for offer in self.provider.offers(needs)], [7, 8])
+        self.assertEqual(self.called()[0], ["machines", "offers", "RTX 5090", "--disk", "200", "--max-price", "0.64",
+                                            "--show", "10", "--query", '{"a": 1}'])
+        with self.assertRaisesRegex(RentError, "did not answer"):
+            self.provider.offers({**needs, "gpu": "H100"})
 
     def test_tells_a_rent_that_failed_from_one_without_an_offer(self):
         needs = {"gpu": "RTX 5090", "image": "image", "disk": 200, "max_price": 0.64}
