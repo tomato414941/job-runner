@@ -61,8 +61,8 @@ class Policy:
     # A job that stops by itself starts again this many times on one machine, and then the run fails.
     restarts: int = 2
     # The run fails when a step fails this many times on machines that pass their check, the install fails
-    # on this many machines before any passes it, or renting fails this many times running otherwise than
-    # for want of an offer.
+    # or takes too long on this many machines before any passes it, or renting fails this many times running
+    # otherwise than for want of an offer.
     step_failures: int = 2
     install_failures: int = 2
     rent_failures: int = 2

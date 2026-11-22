@@ -30,7 +30,8 @@ passes it, the step runs again, and the run fails once it has failed
 policy.step_failures times so. A machine whose install fails before any machine
 passed it goes back unrejected, this run rents it no more, and it is rejected
 once another machine passes the install; the run fails once the install has
-failed on policy.install_failures machines and passed on none. A job that stops
+failed or taken too long on policy.install_failures machines and passed on none,
+as the fault is then the work's. A job that stops
 by itself starts again, and the run fails when it stops more than
 policy.restarts times on one machine.
 
@@ -205,6 +206,7 @@ class Memory:
     spent: float = 0.0
     # step -> how many times it failed on machines that passed their check
     failures: dict = field(default_factory=dict)
+    # Machines the install failed or took too long on before any passed it.
     install_failures: int = 0
     # Whether a machine passed the install; until one does, id -> why for those that failed it.
     installed: bool = False
@@ -368,14 +370,15 @@ class Decision:
             if machine.state != "installing":
                 self.to(machine, "installing")
             elif self.now - machine.since > self.policy.install:
-                self.memory.avoided[ident] = "its install took too long"
-                self.release(ident, "its install took too long", False)
+                self.install_failed(ident, "its install took too long", False)
                 return
             if phase == "empty":
                 # A machine without the job, or an agent that started over before its install was done.
                 self.actions.append(Install(ident))
             elif phase == "install_failed":
-                self.install_failed(ident, report.get("failure") or {})
+                failure = report.get("failure") or {}
+                reason = f"its install failed: {failure.get('detail') or failure.get('error')}"
+                self.install_failed(ident, reason, True)
             return
         self.passed_install()
         if phase == "ready":
@@ -428,17 +431,26 @@ class Decision:
             self.actions.append(Reject(ident, f"{reason}, which another machine of the run passed"))
         self.memory.suspects.clear()
 
-    def install_failed(self, ident, failure):
-        """Reject a machine whose install fails where another's passed; until one passes, the fault may be the work's."""
-        memory, reason = self.memory, f"its install failed: {failure.get('detail') or failure.get('error')}"
+    def install_failed(self, ident, reason, lasting):
+        """Send back a machine whose install did not pass: it failed, a fault that lasts, or took too long, as on a
+        network slow for a while, which does not.
+
+        Once another machine passed the install, the fault is the machine's: it is rejected if it lasts, and this run
+        rents the machine no more either way. Until one passes, the fault may be the work's: the machine goes back
+        unrejected, this run rents it no more, and it is rejected once another passes if its fault lasts; the run
+        fails once the install has not passed on policy.install_failures machines."""
+        memory = self.memory
         if memory.installed:
-            self.release(ident, reason, True)
+            if not lasting:
+                memory.avoided[ident] = reason
+            self.release(ident, reason, lasting)
             return
         memory.install_failures += 1
         if memory.install_failures >= self.policy.install_failures:
-            self.end("failed", f"the install failed on {memory.install_failures} machines and passed on none")
+            self.end("failed", f"the install failed or took too long on {memory.install_failures} machines "
+                               f"and passed on none")
         else:
-            memory.suspects[ident] = reason
+            (memory.suspects if lasting else memory.avoided)[ident] = reason
             self.release(ident, reason, False)
 
     def step_failed(self, ident, machine, report):

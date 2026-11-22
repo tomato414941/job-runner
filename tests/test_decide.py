@@ -315,7 +315,23 @@ class DecideTests(unittest.TestCase):
         _, memory = self.install_failed("m1", Memory())
         actions, memory = self.install_failed("m2", memory)
         self.assertEqual(actions, [Release("m2", "failed", False)])
-        self.assertEqual(memory.detail, "the install failed on 2 machines and passed on none")
+        self.assertEqual(memory.detail, "the install failed or took too long on 2 machines and passed on none")
+
+    def install_slow(self, ident, memory):
+        memory.machines[ident] = Machine("installing", NOW - POLICY.install - 1)
+        return self.decide({ident: seen("installing")}, memory)
+
+    def test_ends_the_run_failed_when_the_install_fails_or_takes_too_long_on_machines_and_passes_on_none(self):
+        _, memory = self.install_failed("m1", Memory())
+        actions, memory = self.install_slow("m2", memory)
+        self.assertEqual(actions, [Release("m2", "failed", False)])
+        self.assertEqual(memory.detail, "the install failed or took too long on 2 machines and passed on none")
+
+    def test_keeps_renting_when_installs_take_too_long_after_another_machine_passed_the_install(self):
+        _, memory = self.install_slow("m1", Memory(installed=True))
+        actions, memory = self.install_slow("m2", memory)
+        self.assertEqual(actions, [Release("m2", "its install took too long", False), Rent(("m1", "m2"))])
+        self.assertIsNone(memory.outcome)
 
     def test_sends_back_unrejected_a_machine_whose_install_takes_too_long_and_rents_it_no_more(self):
         memory = working(state="installing", since=NOW - POLICY.install - 1)
