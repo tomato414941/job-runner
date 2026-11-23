@@ -89,6 +89,15 @@ class SharingTest(SharingTestCase):
         with self.machine("b"):
             self.assertEqual(machines.avoided(machines.entries()), {("vast", 54650)})
 
+    def test_shares_a_withdrawal_recorded_on_one_machine_with_the_ledger_of_another(self):
+        with self.machine("a"):
+            failure = machines.record("unusable", provider="vast", instance=1, machine=54650, host=10, stage="work",
+                                      detail="setup failed: the job's own script ended with 1")
+        with self.machine("b"), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(machines.main(["withdraw", failure["id"], "the job's setup was at fault"]), 0)
+        with self.machine("a"):
+            self.assertEqual(machines.avoided(machines.entries()), set())
+
     def test_goes_on_when_the_bucket_cannot_be_reached_and_uploads_the_event_later(self):
         self.bucket.down = True
         with self.machine("a") as data:

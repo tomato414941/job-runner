@@ -4,6 +4,9 @@
 Every rental goes in one ledger, data/ledger.jsonl beside this script, that all sessions on this workstation share:
 what was offered, what the check measured, how a machine failed, when it went back, and what the work noted of it.
 When .env names an R2 bucket, shared_ledger.py shares the ledger with the sessions on every other machine too.
+An entry is never changed or removed: withdraw records that a check, a failure or a note was wrong, by the id that
+ledger shows, and the ledger counts it no more, on every machine that shares it. A rental's own entries, by which the
+watcher sends machines back, are never withdrawn.
 A search keeps to machines that Vast.ai has verified, unless --unverified also lets in those it has not verified yet,
 leaves out machines that failed once, those that the instances --avoid names ran on, and offers whose power limit is
 below the default that checked machines with the same GPU reported, and puts hosts that failed before after the others. A machine that has not begun to load its image
@@ -41,6 +44,7 @@ Usage:
   job-runner vast extend INSTANCE HOURS
   job-runner vast note INSTANCE TEXT [--values JSON]
   job-runner vast reject INSTANCE DETAIL
+  job-runner vast withdraw ENTRY DETAIL
   job-runner vast return (INSTANCE | --label LABEL)
   job-runner vast list [--label LABEL]
   job-runner vast ledger [GPU]
@@ -102,6 +106,8 @@ RETRYABLE = {429, 502, 503, 504}
 IMAGE_FAULTS = ("manifest unknown", "pull access denied", "repository does not exist", "invalid reference format")
 # The commands that call Vast.ai with the key.
 KEYED = {"rent", "list", "ssh-config", "return", "watch"}
+# The entries that withdraw takes back: what a check measured, how a machine failed, and what the work noted of it.
+WITHDRAWABLE = ("checked", "unusable", "noted")
 
 
 class VastError(Exception):
@@ -174,7 +180,8 @@ def record(event, **fields):
 
 
 def entries():
-    """The ledger's events, each once, with those that other machines shared added first when it is shared."""
+    """The ledger's events, each once and without those withdrawn, with those that other machines shared added first
+    when it is shared."""
     if home() == HERE / "data" and (config := shared_ledger.settings()):
         shared_ledger.pull(home(), config)
     try:
@@ -192,7 +199,8 @@ def entries():
                 continue
             seen.add(entry["id"])
         found.append(entry)
-    return found
+    withdrawn = {entry["entry"] for entry in found if entry["event"] == "withdrawn"}
+    return [entry for entry in found if entry["event"] not in WITHDRAWABLE or entry.get("id") not in withdrawn]
 
 
 def avoided(ledger):
@@ -761,11 +769,22 @@ def note(args):
 
 
 def reject(args):
-    """Record that the machine failed the work, as a failed check would have, so that rent never rents it again."""
+    """Record that the machine failed the work, as a failed check would have, so that rent rents it again only once
+    that is withdrawn."""
     held = held_or_exit(args.instance)
     record("unusable", provider=PROVIDER, instance=args.instance, machine=held["machine"], host=held["host"],
            gpu=held["gpu"], stage="work", detail=args.detail[-500:])
     print(json.dumps({"rejected": args.instance, "machine": held["machine"]}))
+    return 0
+
+
+def withdraw(args):
+    """Record that a check, a failure or a note was wrong, so that the ledger counts it no more."""
+    entry = next((entry for entry in entries() if entry.get("id") == args.entry), None)
+    if entry is None or entry["event"] not in WITHDRAWABLE:
+        raise SystemExit(f"the ledger has no check, failure or note {args.entry} to withdraw")
+    record("withdrawn", provider=PROVIDER, entry=args.entry, detail=args.detail[-500:])
+    print(json.dumps({"withdrawn": args.entry, "event": entry["event"], "machine": entry.get("machine")}))
     return 0
 
 
@@ -821,17 +840,17 @@ def show_ledger(args):
             continue
         row = machines.setdefault((entry["provider"], entry["machine"]), {
             "machine": entry["machine"], "host": entry.get("host"), "gpu": entry.get("gpu"), "where": entry.get("where"),
-            "rented": 0, "passed": 0, "failed": [], "notes": []})
+            "rented": 0, "checks": [], "failed": [], "notes": []})
         if entry["event"] == "rented":
             row["rented"] += 1
             row["last"] = entry["at"][:10]
         elif entry["event"] == "checked" and entry.get("kept"):
-            row["passed"] += 1
-            row["check"] = summary(entry["results"])
+            row["checks"].append({"id": entry.get("id"), **summary(entry["results"])})
         elif entry["event"] == "unusable":
-            row["failed"].append(f"{entry['stage']}: {entry.get('detail', '')[:120]}")
+            row["failed"].append({"id": entry.get("id"), "stage": entry["stage"],
+                                  "detail": entry.get("detail", "")[:120]})
         elif entry["event"] == "noted":
-            row["notes"].append({"note": entry["note"], **entry.get("values", {})})
+            row["notes"].append({"id": entry.get("id"), "note": entry["note"], **entry.get("values", {})})
     for gpu in sorted({row["gpu"] for row in machines.values() if row["gpu"]}):
         medians, count = typical(ledger, gpu, machine_check.VERSION)
         print(json.dumps({"gpu": gpu, "passed_machines": count,
@@ -885,10 +904,14 @@ def parser():
     noting.add_argument("instance", type=int)
     noting.add_argument("text")
     noting.add_argument("--values", type=json.loads, help="measurements, as a JSON object")
-    rejecting = commands.add_parser("reject", help="record that the machine failed the work, so that rent never "
-                                                   "rents it again")
+    rejecting = commands.add_parser("reject", help="record that the machine failed the work, so that rent rents it "
+                                                   "again only once that is withdrawn")
     rejecting.add_argument("instance", type=int)
     rejecting.add_argument("detail")
+    withdrawing = commands.add_parser("withdraw", help="record that a check, a failure or a note was wrong, so that "
+                                                       "the ledger counts it no more")
+    withdrawing.add_argument("entry", help="the entry's id, as ledger shows it")
+    withdrawing.add_argument("detail")
     giving_back = commands.add_parser("return", help="send back the machine, or every machine with the label")
     which = giving_back.add_mutually_exclusive_group(required=True)
     which.add_argument("instance", type=int, nargs="?")
@@ -897,14 +920,16 @@ def parser():
     holding.add_argument("--label")
     connecting = commands.add_parser("ssh-config", help="write how to reach the machine over ssh again, and print where")
     connecting.add_argument("instance", type=int)
-    listing = commands.add_parser("ledger", help="show how every machine did, and each GPU's medians")
+    listing = commands.add_parser("ledger", help="show how every machine did, with the id of each check, failure and "
+                                                 "note, and each GPU's medians")
     listing.add_argument("gpu", nargs="?")
     commands.add_parser("watch", help="send back this workstation's machines at their deadlines, round after round")
     return found
 
 
 COMMANDS = {"offers": list_offers, "rent": rent, "ssh-config": ssh_config, "extend": extend, "note": note,
-            "reject": reject, "return": give_back, "list": list_machines, "ledger": show_ledger, "watch": watch}
+            "reject": reject, "withdraw": withdraw, "return": give_back, "list": list_machines, "ledger": show_ledger,
+            "watch": watch}
 
 
 def main(argv=None):

@@ -62,7 +62,7 @@ class LedgerTestCase(unittest.TestCase):
         os.environ.pop("VAST_SSH_KEY_FILE", None)
 
     def passed(self, machine, gpu="RTX 5090", **measured):
-        machines.record("checked", provider="vast", instance=machine, machine=machine, host=machine, gpu=gpu,
+        return machines.record("checked", provider="vast", instance=machine, machine=machine, host=machine, gpu=gpu,
                           results=results(**measured), kept=True, reasons=[])
 
     def failed(self, machine, host, stage="start"):
@@ -365,6 +365,52 @@ class GiveBackTest(LedgerTestCase):
         machines.record("released", provider="vast", instance=7, by="command")
         with self.assertRaises(SystemExit):
             machines.main(["extend", "7", "2"])
+
+
+class WithdrawTest(LedgerTestCase):
+    def withdraw(self, entry, detail="recorded in error"):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return machines.main(["withdraw", entry, detail])
+
+    def ledger(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            machines.main(["ledger"])
+        return [json.loads(line) for line in output.getvalue().splitlines() if '"machine"' in line]
+
+    def test_withdraws_a_check_a_failure_and_a_note_by_the_ids_that_ledger_shows(self):
+        self.rented(7, machines.now())
+        self.passed(7)
+        with contextlib.redirect_stdout(io.StringIO()):
+            machines.main(["note", "7", "ran the first step"])
+            machines.main(["reject", "7", "setup failed: the job's own script ended with 1"])
+        [row] = self.ledger()
+        for entry in (row["checks"][0], row["failed"][0], row["notes"][0]):
+            self.assertEqual(self.withdraw(entry["id"]), 0)
+        [row] = self.ledger()
+        self.assertEqual((row["rented"], row["checks"], row["failed"], row["notes"]), (1, [], [], []))
+
+    def test_rents_again_a_machine_whose_failure_was_withdrawn(self):
+        self.failed(7, host=70, stage="work")
+        failure = machines.entries()[0]
+        self.withdraw(failure["id"], "the job's setup was at fault")
+        self.assertEqual(machines.avoided(machines.entries()), set())
+        self.assertEqual(machines.choose([offer(8, 80, 0.5), offer(7, 70, 0.4)], machines.entries()),
+                         [offer(7, 70, 0.4), offer(8, 80, 0.5)])
+
+    def test_leaves_a_withdrawn_check_out_of_the_medians(self):
+        self.passed(1, matmul=100.0)
+        wrong = self.passed(2, matmul=300.0)
+        self.withdraw(wrong["id"], "measured while another job ran")
+        self.assertEqual(machines.typical(machines.entries(), "RTX 5090", machine_check.VERSION),
+                         ({"matmul_tflops": 100.0, "memory_gbps": 1500.0}, 1))
+
+    def test_withdraws_no_entry_of_a_rental(self):
+        self.rented(7, machines.now())
+        rented = machines.entries()[0]
+        with self.assertRaises(SystemExit):
+            self.withdraw(rented["id"])
+        self.assertEqual(self.events(), [("rented", 7)])
 
 
 class ListTest(LedgerTestCase):
